@@ -1,0 +1,174 @@
+import csv
+import re
+import shutil
+import subprocess
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+from ..models.profile import BankProfile, quote_py_string, to_account_id
+
+
+def find_csv2ofx_binary() -> str | None:
+    return shutil.which("csv2ofx")
+
+
+def mapped_columns_missing(source_csv: Path, profile: BankProfile) -> list[str]:
+    try:
+        with source_csv.open("r", encoding="utf-8-sig", newline="") as src:
+            reader = csv.DictReader(src, delimiter=profile.delimiter)
+            headers = set(reader.fieldnames or [])
+    except OSError as exc:
+        return [f"Could not read CSV: {exc}"]
+
+    required = [value for value in profile.field_map.values() if value]
+    if profile.use_split_amounts:
+        required.extend([profile.debit_col, profile.credit_col])
+
+    return [col for col in required if col and col not in headers]
+
+
+def run_conversion(
+    csv2ofx_bin: str,
+    source_csv: Path,
+    destination_ofx: Path,
+    profile: BankProfile,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="openstatement_") as temp_dir:
+        mapping_file = Path(temp_dir) / "mapping.py"
+        write_mapping_file(mapping_file, profile)
+
+        cmd = [
+            csv2ofx_bin,
+            "-x",
+            str(mapping_file),
+            "-a",
+            profile.account_type,
+            "-o",
+            str(source_csv),
+            str(destination_ofx),
+        ]
+
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            details = (proc.stderr or proc.stdout or "Unknown csv2ofx error").strip()
+            raise RuntimeError(f"csv2ofx failed:\n{details}")
+
+
+def build_ofx_preview(csv2ofx_bin: str, source_csv: Path, profile: BankProfile) -> str:
+    with tempfile.TemporaryDirectory(prefix="openstatement_preview_") as temp_dir:
+        preview_ofx = Path(temp_dir) / "preview.ofx"
+        run_conversion(csv2ofx_bin, source_csv, preview_ofx, profile)
+        content = preview_ofx.read_text(encoding="utf-8", errors="replace")
+    return format_preview(content)
+
+
+def extract_tag(block: str, tag: str) -> str:
+    match = re.search(rf"<{tag}>([^<\r\n]+)", block, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def format_ofx_date(raw: str) -> str:
+    if not raw:
+        return ""
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) < 8:
+        return raw
+    try:
+        dt = datetime.strptime(digits[:14] if len(digits) >= 14 else digits[:8], "%Y%m%d%H%M%S" if len(digits) >= 14 else "%Y%m%d")
+        return dt.strftime("%Y-%m-%d")
+    except ValueError:
+        return raw
+
+
+def format_preview(ofx_content: str, max_rows: int = 20) -> str:
+    blocks = re.findall(r"<STMTTRN>(.*?)</STMTTRN>", ofx_content, flags=re.IGNORECASE | re.DOTALL)
+    if not blocks:
+        lines = ofx_content.splitlines()
+        head = "\n".join(lines[:60])
+        return "Could not parse transaction blocks. Raw OFX preview:\n\n" + head
+
+    rows = []
+    for block in blocks[:max_rows]:
+        posted = format_ofx_date(extract_tag(block, "DTPOSTED"))
+        amount = extract_tag(block, "TRNAMT")
+        name = extract_tag(block, "NAME")
+        memo = extract_tag(block, "MEMO")
+        fitid = extract_tag(block, "FITID")
+        rows.append(f"{posted:12} {amount:>12}  {name} | {memo} | id={fitid}")
+
+    header = "Date         Amount        Name | Memo | id\n"
+    divider = "-" * 96
+    suffix = ""
+    if len(blocks) > max_rows:
+        suffix = f"\n\nShowing first {max_rows} of {len(blocks)} transactions."
+
+    return f"{header}{divider}\n" + "\n".join(rows) + suffix
+
+
+def write_mapping_file(mapping_file: Path, profile: BankProfile) -> None:
+    fallback_account = profile.name or "Account"
+    fallback_bank = profile.name or "Bank"
+
+    lines = [
+        "from operator import itemgetter",
+        "",
+        "def _to_float(value):",
+        "    text = str(value or '').strip()",
+        "    if not text:",
+        "        return 0.0",
+        "    negative = text.startswith('(') and text.endswith(')')",
+        "    if negative:",
+        "        text = text[1:-1]",
+        "    cleaned = text.replace('$', '').replace(',', '').replace(' ', '')",
+        "    cleaned = ''.join(ch for ch in cleaned if ch in '0123456789+-.')",
+        "    if cleaned in {'', '+', '-', '.', '+.', '-.'}:",
+        "        return 0.0",
+        "    amount = float(cleaned)",
+        "    return -amount if negative else amount",
+        "",
+        "def _split_amount(record):",
+        f"    debit = _to_float(record.get({quote_py_string(profile.debit_col)}, ''))",
+        f"    credit = _to_float(record.get({quote_py_string(profile.credit_col)}, ''))",
+        "    return credit - abs(debit)",
+        "",
+        "mapping = {",
+        "    'has_header': True,",
+        f"    'delimiter': {quote_py_string(profile.delimiter or ',')},",
+        f"    'currency': {quote_py_string(profile.currency)},",
+        f"    'account_id': {quote_py_string(profile.account_id or to_account_id(profile.name))},",
+    ]
+
+    date_col = profile.field_map["date"]
+    lines.append(f"    'date': itemgetter({quote_py_string(date_col)}),")
+
+    if profile.use_split_amounts:
+        lines.append("    'amount': _split_amount,")
+    else:
+        amount_col = profile.field_map["amount"]
+        lines.append(f"    'amount': itemgetter({quote_py_string(amount_col)}),")
+
+    account_col = profile.field_map.get("account")
+    if account_col:
+        lines.append(f"    'account': itemgetter({quote_py_string(account_col)}),")
+    else:
+        lines.append(f"    'account': {quote_py_string(fallback_account)},")
+
+    bank_col = profile.field_map.get("bank")
+    if bank_col:
+        lines.append(f"    'bank': itemgetter({quote_py_string(bank_col)}),")
+    else:
+        lines.append(f"    'bank': {quote_py_string(fallback_bank)},")
+
+    for field in ["payee", "desc", "notes", "check_num", "id", "balance", "class"]:
+        col = profile.field_map.get(field)
+        if col:
+            lines.append(f"    '{field}': itemgetter({quote_py_string(col)}),")
+
+    if profile.date_format:
+        lines.append(f"    'parse_fmt': {quote_py_string(profile.date_format)},")
+    if profile.dayfirst:
+        lines.append("    'dayfirst': True,")
+
+    lines.extend(["}", ""])
+    mapping_file.write_text("\n".join(lines), encoding="utf-8")
