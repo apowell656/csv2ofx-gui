@@ -1,0 +1,131 @@
+from pathlib import Path
+
+from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout
+
+from ...models.profile import BankProfile
+from ...services.conversion import (
+    build_ofx_preview,
+    find_csv2ofx_binary,
+    mapped_columns_missing,
+    run_conversion,
+)
+
+
+class ConversionSectionMixin:
+    def convert_to_ofx(self) -> None:
+        prep = self._prepare_conversion_inputs()
+        if prep is None:
+            return
+        csv2ofx_bin, source_path, profile = prep
+
+        default_name = f"{source_path.stem}.ofx"
+        destination, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save OFX file",
+            str(source_path.with_name(default_name)),
+            "OFX Files (*.ofx)",
+        )
+
+        if not destination:
+            return
+
+        try:
+            run_conversion(csv2ofx_bin, source_path, Path(destination), profile)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Conversion Error", str(exc))
+            return
+
+        QMessageBox.information(self, "Success", f"OFX file written to:\n{destination}")
+
+    def preview_ofx(self) -> None:
+        prep = self._prepare_conversion_inputs()
+        if prep is None:
+            return
+        csv2ofx_bin, source_path, profile = prep
+
+        try:
+            preview_text = build_ofx_preview(csv2ofx_bin, source_path, profile)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Preview Error", str(exc))
+            return
+
+        self._show_preview_dialog(preview_text)
+
+    def _resolve_source_csv_path(self) -> Path | None:
+        csv_source = self.csv_path_input.text().strip()
+        if not csv_source:
+            QMessageBox.warning(self, "Missing CSV", "Choose a CSV file first.")
+            return None
+
+        source_path = Path(csv_source)
+        if not source_path.exists():
+            QMessageBox.warning(self, "Missing CSV", "The selected CSV file does not exist.")
+            return None
+        return source_path
+
+    def _build_valid_profile(self) -> BankProfile | None:
+        profile = self._build_profile_from_ui()
+        if not self._validate_required_fields(profile):
+            return None
+        return profile
+
+    def _validate_mapped_columns(self, source_path: Path, profile: BankProfile) -> bool:
+        missing_cols = mapped_columns_missing(source_path, profile)
+        if not missing_cols:
+            return True
+
+        QMessageBox.warning(
+            self,
+            "Missing Columns",
+            "These mapped columns are not present in the CSV:\n" + "\n".join(missing_cols),
+        )
+        return False
+
+    def _find_csv2ofx_binary(self) -> str | None:
+        csv2ofx_bin = find_csv2ofx_binary()
+        if csv2ofx_bin:
+            return csv2ofx_bin
+
+        QMessageBox.critical(
+            self,
+            "csv2ofx Not Found",
+            "The `csv2ofx` command is not installed or not in PATH.\n\n"
+            "Install it with:\n"
+            "pip install csv2ofx",
+        )
+        return None
+
+    def _prepare_conversion_inputs(self) -> tuple[str, Path, BankProfile] | None:
+        source_path = self._resolve_source_csv_path()
+        if source_path is None:
+            return None
+
+        profile = self._build_valid_profile()
+        if profile is None:
+            return None
+
+        if not self._validate_mapped_columns(source_path, profile):
+            return None
+
+        csv2ofx_bin = self._find_csv2ofx_binary()
+        if csv2ofx_bin is None:
+            return None
+
+        return csv2ofx_bin, source_path, profile
+
+    def _show_preview_dialog(self, preview_text: str) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("OFX Preview")
+        dialog.resize(920, 520)
+
+        layout = QVBoxLayout(dialog)
+        text = QPlainTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(preview_text)
+        layout.addWidget(text)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+
+        dialog.exec()

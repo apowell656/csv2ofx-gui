@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openstatement"
+version = "0.1.0"
+description = "Desktop app to map bank CSV exports into OFX files"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6==6.11.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-qt>=4.4",
+]
+
+[project.scripts]
+openstatement = "openstatement.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["openstatement"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
