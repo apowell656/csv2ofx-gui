@@ -18,7 +18,7 @@ class MainWindow(
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.resize(1040, 760)
+        self.resize(1140, 900)
 
         self.profile_store = ProfileStore()
         self.profiles = self.profile_store.load()

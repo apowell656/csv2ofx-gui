@@ -1,10 +1,12 @@
 import csv
+import re
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from ...models.profile import normalize_header
+from ...services.filename_metadata import FilenameMetadata, parse_filename_metadata
 
 
 class CsvSectionMixin:
@@ -20,10 +22,12 @@ class CsvSectionMixin:
             return
 
         self.csv_path_input.setText(path)
+        self.status_label.setText(Path(path).name)
         self.load_csv_headers(path)
 
     def load_csv_headers(self, path: str) -> None:
         delimiter = self.delimiter_input.text() or ","
+        source_path = Path(path)
 
         try:
             with open(path, "r", encoding="utf-8-sig", newline="") as handle:
@@ -31,12 +35,45 @@ class CsvSectionMixin:
                 headers = next(reader)
         except (OSError, StopIteration, csv.Error) as exc:
             QMessageBox.critical(self, "CSV Error", f"Could not read CSV headers:\n{exc}")
+            self.status_label.setText("CSV load failed")
             return
 
         headers = [h.strip() for h in headers]
         self._set_headers(headers)
         self._guess_default_fields(headers)
-        self._detect_saved_profile(headers)
+        metadata = self._refresh_filename_metadata(source_path)
+        self._detect_saved_profile(headers, metadata)
+        self.status_label.setText(source_path.name)
+
+    def _on_filename_metadata_settings_changed(self, *_args) -> None:
+        source = self.csv_path_input.text().strip()
+        if not source:
+            return
+        self._refresh_filename_metadata(Path(source))
+
+    def _refresh_filename_metadata(self, source_path: Path) -> FilenameMetadata | None:
+        result = parse_filename_metadata(source_path, self.filename_pattern_input.text().strip())
+
+        if not self.auto_parse_filename_check.isChecked():
+            self.filename_metadata_label.setText("Filename metadata parsing is off.")
+            return result.metadata
+
+        if result.metadata is None:
+            self.filename_metadata_label.setText(
+                f"Could not parse filename metadata: {result.error} You can still enter values manually."
+            )
+            self.filename_account_input.clear()
+            self.filename_date_input.clear()
+            self.filename_balance_input.clear()
+            return None
+
+        self.filename_metadata_label.setText("Detected from filename. Review and edit if needed before conversion.")
+        self.filename_account_input.setText(result.metadata.account_id)
+        self.filename_date_input.setText(result.metadata.statement_date)
+        self.filename_balance_input.setText(result.metadata.ending_balance)
+        self.bank_name_input.setText(result.metadata.account_name)
+        self.account_id_input.setText(result.metadata.account_id)
+        return result.metadata
 
     def _guess_default_fields(self, headers: list[str]) -> None:
         guesses = {
@@ -75,22 +112,77 @@ class CsvSectionMixin:
                     target.setCurrentIndex(idx)
                     break
 
-    def _detect_saved_profile(self, headers: list[str]) -> None:
+    def _detect_saved_profile(self, headers: list[str], metadata: FilenameMetadata | None = None) -> None:
         signature = [normalize_header(h) for h in headers]
-        matched = [p for p in self.profiles.values() if p.headers == signature]
+        ranked: list[tuple[int, int, int, str, object]] = []
 
-        if not matched:
+        for profile in self.profiles.values():
+            score = 0
+            metadata_score = 0
+            header_score = 0
+            reasons: list[str] = []
+            exact_header_match = profile.headers == signature
+
+            if exact_header_match:
+                header_score += 25
+                reasons.append("CSV headers")
+
+            if metadata and metadata.account_id and profile.account_id == metadata.account_id:
+                metadata_score += 100
+                reasons.append("filename account ID")
+
+            parsed_name = self._normalize_match_name(metadata.account_name) if metadata else ""
+            profile_name = self._normalize_match_name(profile.name)
+            if parsed_name and profile_name and parsed_name == profile_name:
+                metadata_score += 35
+                reasons.append("filename account name")
+
+            score = metadata_score + header_score
+            if score:
+                ranked.append((score, metadata_score, header_score, ", ".join(reasons), profile))
+
+        if not ranked:
             self.detected_label.setText("No matching saved profile found for this CSV format.")
             return
 
-        names = ", ".join(profile.name for profile in matched)
-        self.detected_label.setText(f"Found matching profile(s): {names}")
+        ranked.sort(key=lambda item: (item[0], item[1], item[2], item[4].name.casefold()), reverse=True)
+        top_score = ranked[0][0]
+        top_matches = [item for item in ranked if item[0] == top_score]
+        top_names = ", ".join(item[4].name for item in top_matches)
 
-        profile = matched[0]
+        profile = ranked[0][4]
+        header_score = ranked[0][2]
+        metadata_score = ranked[0][1]
+        exact_header_match = header_score > 0
+        match_reason = ranked[0][3]
+
+        if metadata_score > 0:
+            if exact_header_match:
+                self.detected_label.setText(f"Found profile(s): {top_names} (matched by {match_reason})")
+                prompt_text = (
+                    f"A bank profile was found: '{profile.name}'.\n"
+                    f"Matched by {match_reason}.\nApply it now?"
+                )
+            else:
+                self.detected_label.setText(f"Found likely profile(s): {top_names} (matched by {match_reason})")
+                prompt_text = (
+                    f"A likely bank profile was found: '{profile.name}'.\n"
+                    f"Matched by {match_reason}.\nApply it now?"
+                )
+        elif exact_header_match:
+            self.detected_label.setText(f"Found matching profile(s): {top_names}")
+            prompt_text = f"A saved bank format was found: '{profile.name}'.\nApply it now?"
+        else:
+            self.detected_label.setText(f"Found likely profile(s): {top_names} (matched by {match_reason})")
+            prompt_text = (
+                f"A likely bank profile was found: '{profile.name}'.\n"
+                f"Matched by {match_reason}.\nApply it now?"
+            )
+
         answer = QMessageBox.question(
             self,
             "Use saved profile?",
-            f"A saved bank format was found: '{profile.name}'.\nApply it now?",
+            prompt_text,
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
@@ -100,3 +192,6 @@ class CsvSectionMixin:
             idx = self.profile_combo.findText(profile.name, Qt.MatchFixedString)
             if idx >= 0:
                 self.profile_combo.setCurrentIndex(idx)
+
+    def _normalize_match_name(self, value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", (value or "").casefold()).strip()

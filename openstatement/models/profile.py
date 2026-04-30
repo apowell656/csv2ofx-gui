@@ -6,6 +6,8 @@ from typing import Any
 
 from PySide6.QtCore import QStandardPaths
 
+DEFAULT_FILENAME_PATTERN = "{account_name}_{account_id}_{statement_date}_{ending_balance}.csv"
+
 
 @dataclass
 class BankProfile:
@@ -21,6 +23,8 @@ class BankProfile:
     account_type: str
     account_id: str
     currency: str
+    auto_parse_filename_metadata: bool
+    filename_pattern: str
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "BankProfile":
@@ -37,6 +41,8 @@ class BankProfile:
             account_type=raw.get("account_type", "CHECKING"),
             account_id=raw.get("account_id", ""),
             currency=raw.get("currency", "USD"),
+            auto_parse_filename_metadata=bool(raw.get("auto_parse_filename_metadata", False)),
+            filename_pattern=normalize_filename_pattern(raw.get("filename_pattern", DEFAULT_FILENAME_PATTERN)),
         )
 
 
@@ -76,3 +82,10 @@ def to_account_id(name: str) -> str:
 
 def quote_py_string(value: str) -> str:
     return repr(value)
+
+
+def normalize_filename_pattern(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return DEFAULT_FILENAME_PATTERN
+    return text.replace("{last8}", "{account_id}")
