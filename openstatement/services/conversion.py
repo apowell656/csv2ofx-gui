@@ -1,16 +1,36 @@
 import csv
+import importlib.util
+import io
 import re
 import shutil
 import subprocess
 import tempfile
+from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from ..models.profile import BankProfile, quote_py_string, to_account_id
 
+CSV2OFX_MODULE_RUNNER = "__csv2ofx_module__"
+
+
+@dataclass
+class OfxMetadataOverrides:
+    account_id: str = ""
+    statement_date: str = ""
+    ending_balance: str = ""
+
 
 def find_csv2ofx_binary() -> str | None:
-    return shutil.which("csv2ofx")
+    binary = shutil.which("csv2ofx")
+    if binary:
+        return binary
+
+    if importlib.util.find_spec("csv2ofx.main") is not None:
+        return CSV2OFX_MODULE_RUNNER
+
+    return None
 
 
 def mapped_columns_missing(source_csv: Path, profile: BankProfile) -> list[str]:
@@ -33,13 +53,13 @@ def run_conversion(
     source_csv: Path,
     destination_ofx: Path,
     profile: BankProfile,
+    overrides: OfxMetadataOverrides | None = None,
 ) -> None:
     with tempfile.TemporaryDirectory(prefix="openstatement_") as temp_dir:
         mapping_file = Path(temp_dir) / "mapping.py"
         write_mapping_file(mapping_file, profile)
 
-        cmd = [
-            csv2ofx_bin,
+        args = [
             "-x",
             str(mapping_file),
             "-a",
@@ -49,10 +69,44 @@ def run_conversion(
             str(destination_ofx),
         ]
 
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if proc.returncode != 0:
-            details = (proc.stderr or proc.stdout or "Unknown csv2ofx error").strip()
-            raise RuntimeError(f"csv2ofx failed:\n{details}")
+        if csv2ofx_bin == CSV2OFX_MODULE_RUNNER:
+            _run_csv2ofx_module(args)
+        else:
+            _run_csv2ofx_subprocess([csv2ofx_bin, *args])
+
+    if overrides:
+        apply_ofx_overrides(destination_ofx, overrides)
+
+
+def _run_csv2ofx_subprocess(cmd: list[str]) -> None:
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        details = (proc.stderr or proc.stdout or "Unknown csv2ofx error").strip()
+        raise RuntimeError(f"csv2ofx failed:\n{details}")
+
+
+def _run_csv2ofx_module(args: list[str]) -> None:
+    from csv2ofx.main import run as csv2ofx_run
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    try:
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            csv2ofx_run(args)
+    except SystemExit as exc:
+        code = exc.code
+        if code in (0, None):
+            return
+
+        details = ""
+        if isinstance(code, str):
+            details = code.strip()
+
+        if not details:
+            details = (stderr.getvalue() or stdout.getvalue() or "Unknown csv2ofx error").strip()
+
+        raise RuntimeError(f"csv2ofx failed:\n{details}") from None
 
 
 def build_ofx_preview(csv2ofx_bin: str, source_csv: Path, profile: BankProfile) -> str:
@@ -61,6 +115,89 @@ def build_ofx_preview(csv2ofx_bin: str, source_csv: Path, profile: BankProfile) 
         run_conversion(csv2ofx_bin, source_csv, preview_ofx, profile)
         content = preview_ofx.read_text(encoding="utf-8", errors="replace")
     return format_preview(content)
+
+
+def apply_ofx_overrides(destination_ofx: Path, overrides: OfxMetadataOverrides) -> None:
+    text = destination_ofx.read_text(encoding="utf-8", errors="replace")
+    updated = text
+
+    if overrides.account_id and not _has_tag_value(updated, "ACCTID"):
+        updated = _set_or_insert_account_id(updated, overrides.account_id)
+
+    should_set_ledger = bool(overrides.statement_date or overrides.ending_balance)
+    if should_set_ledger and (not _has_tag_value(updated, "DTASOF") or not _has_tag_value(updated, "BALAMT")):
+        updated = _set_or_insert_ledger_values(
+            updated,
+            statement_date=overrides.statement_date,
+            ending_balance=overrides.ending_balance,
+        )
+
+    if updated != text:
+        destination_ofx.write_text(updated, encoding="utf-8")
+
+
+def _has_tag_value(content: str, tag: str) -> bool:
+    match = re.search(rf"<{tag}>([^<\r\n]+)", content, flags=re.IGNORECASE)
+    return bool(match and match.group(1).strip())
+
+
+def _replace_tag_in_block(block: str, tag: str, value: str) -> str:
+    if not value:
+        return block
+
+    pattern = re.compile(rf"(<{tag}>)([^<\r\n]*)", flags=re.IGNORECASE)
+    if pattern.search(block):
+        return pattern.sub(rf"\1{value}", block, count=1)
+    return block.replace(">", ">\n" + f"<{tag}>{value}", 1)
+
+
+def _set_or_insert_account_id(content: str, account_id: str) -> str:
+    acctid_pattern = re.compile(r"(<ACCTID>)([^<\r\n]*)", flags=re.IGNORECASE)
+    if acctid_pattern.search(content):
+        return acctid_pattern.sub(rf"\1{account_id}", content, count=1)
+
+    block_pattern = re.compile(r"<(BANKACCTFROM|CCACCTFROM)>(.*?)</\1>", flags=re.IGNORECASE | re.DOTALL)
+    match = block_pattern.search(content)
+    if not match:
+        return content
+
+    block = match.group(0)
+    new_block = block.replace(">", ">\n" + f"<ACCTID>{account_id}", 1)
+    return content.replace(block, new_block, 1)
+
+
+def _set_or_insert_ledger_values(content: str, statement_date: str, ending_balance: str) -> str:
+    ledger_pattern = re.compile(r"<LEDGERBAL>(.*?)</LEDGERBAL>", flags=re.IGNORECASE | re.DOTALL)
+    match = ledger_pattern.search(content)
+
+    statement_value = statement_date.replace("-", "") if statement_date else ""
+    balance_value = ending_balance
+
+    if match:
+        block = match.group(0)
+        updated_block = block
+        if statement_value and not _has_tag_value(block, "DTASOF"):
+            updated_block = _replace_tag_in_block(updated_block, "DTASOF", statement_value)
+        if balance_value and not _has_tag_value(block, "BALAMT"):
+            updated_block = _replace_tag_in_block(updated_block, "BALAMT", balance_value)
+        return content.replace(block, updated_block, 1)
+
+    if not (statement_value or balance_value):
+        return content
+
+    pieces = ["<LEDGERBAL>"]
+    if balance_value:
+        pieces.append(f"<BALAMT>{balance_value}")
+    if statement_value:
+        pieces.append(f"<DTASOF>{statement_value}")
+    pieces.append("</LEDGERBAL>")
+    insert_block = "\n".join(pieces) + "\n"
+
+    stmtrs_close = re.search(r"</STMTRS>", content, flags=re.IGNORECASE)
+    if stmtrs_close:
+        idx = stmtrs_close.start()
+        return content[:idx] + insert_block + content[idx:]
+    return content
 
 
 def extract_tag(block: str, tag: str) -> str:
@@ -109,6 +246,7 @@ def format_preview(ofx_content: str, max_rows: int = 20) -> str:
 def write_mapping_file(mapping_file: Path, profile: BankProfile) -> None:
     fallback_account = profile.name or "Account"
     fallback_bank = profile.name or "Bank"
+    amount_col = profile.field_map.get("amount", "")
 
     lines = [
         "from operator import itemgetter",
@@ -132,6 +270,9 @@ def write_mapping_file(mapping_file: Path, profile: BankProfile) -> None:
         f"    credit = _to_float(record.get({quote_py_string(profile.credit_col)}, ''))",
         "    return credit - abs(debit)",
         "",
+        "def _amount(record):",
+        f"    return _to_float(record.get({quote_py_string(amount_col)}, ''))",
+        "",
         "mapping = {",
         "    'has_header': True,",
         f"    'delimiter': {quote_py_string(profile.delimiter or ',')},",
@@ -145,8 +286,7 @@ def write_mapping_file(mapping_file: Path, profile: BankProfile) -> None:
     if profile.use_split_amounts:
         lines.append("    'amount': _split_amount,")
     else:
-        amount_col = profile.field_map["amount"]
-        lines.append(f"    'amount': itemgetter({quote_py_string(amount_col)}),")
+        lines.append("    'amount': _amount,")
 
     account_col = profile.field_map.get("account")
     if account_col:

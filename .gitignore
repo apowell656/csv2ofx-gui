@@ -16,7 +16,6 @@ build/
 dist/
 *.egg-info/
 .eggs/
-*.spec
 
 # PyInstaller
 *.manifest
@@ -29,6 +28,9 @@ dist/
 *.exe
 *.msi
 *.AppImage
+packaging/AppDir/
+packaging/deb/
+packaging/tools/
 
 # Test / coverage
 .pytest_cache/
@@ -86,3 +88,5 @@ sample_output/
 !samples/
 !samples/**/*.csv
 !samples/**/*.ofx
+# Local PyInstaller cache
+.pyinstaller/

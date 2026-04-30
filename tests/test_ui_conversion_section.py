@@ -18,6 +18,8 @@ def _profile() -> BankProfile:
         account_type="CHECKING",
         account_id="secu",
         currency="USD",
+        auto_parse_filename_metadata=False,
+        filename_pattern="{account_name}_{last8}_{statement_date}_{ending_balance}.csv",
     )
 
 

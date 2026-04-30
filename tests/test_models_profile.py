@@ -19,6 +19,7 @@ def test_bank_profile_from_dict_defaults() -> None:
     assert profile.delimiter == ","
     assert profile.account_type == "CHECKING"
     assert profile.currency == "USD"
+    assert profile.auto_parse_filename_metadata is False
 
 
 def test_profile_store_load_missing_returns_empty(tmp_path: Path, monkeypatch) -> None:
@@ -59,6 +60,8 @@ def test_profile_store_save_and_load_roundtrip(tmp_path: Path, monkeypatch) -> N
         account_type="CHECKING",
         account_id="secu",
         currency="USD",
+        auto_parse_filename_metadata=False,
+        filename_pattern="{account_name}_{last8}_{statement_date}_{ending_balance}.csv",
     )
 
     store.save({"SECU": profile})

@@ -4,11 +4,13 @@ from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QPlainTextEdit,
 
 from ...models.profile import BankProfile
 from ...services.conversion import (
+    OfxMetadataOverrides,
     build_ofx_preview,
     find_csv2ofx_binary,
     mapped_columns_missing,
     run_conversion,
 )
+from ...services.filename_metadata import normalize_balance, normalize_statement_date
 
 
 class ConversionSectionMixin:
@@ -30,7 +32,8 @@ class ConversionSectionMixin:
             return
 
         try:
-            run_conversion(csv2ofx_bin, source_path, Path(destination), profile)
+            overrides = self._resolve_metadata_overrides(profile)
+            run_conversion(csv2ofx_bin, source_path, Path(destination), profile, overrides=overrides)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Conversion Error", str(exc))
             return
@@ -112,6 +115,38 @@ class ConversionSectionMixin:
             return None
 
         return csv2ofx_bin, source_path, profile
+
+    def _resolve_metadata_overrides(self, profile: BankProfile) -> OfxMetadataOverrides | None:
+        account_id = self.filename_account_input.text().strip()
+        date_text = normalize_statement_date(self.filename_date_input.text())
+        balance_text = normalize_balance(self.filename_balance_input.text())
+
+        if self.filename_date_input.text().strip() and not date_text:
+            self.filename_metadata_label.setText(
+                "Filename metadata date is invalid. Expected YYYY-MM-DD. Ignoring statement date override."
+            )
+
+        if self.filename_balance_input.text().strip() and not balance_text:
+            self.filename_metadata_label.setText(
+                "Filename metadata balance is invalid. Expected decimal value. Ignoring balance override."
+            )
+
+        if not account_id and not date_text and not balance_text:
+            return None
+
+        if account_id and not profile.field_map.get("account"):
+            profile.account_id = account_id
+
+        if balance_text:
+            self.filename_balance_input.setText(balance_text)
+        if date_text:
+            self.filename_date_input.setText(date_text)
+
+        return OfxMetadataOverrides(
+            account_id=account_id,
+            statement_date=date_text,
+            ending_balance=balance_text,
+        )
 
     def _show_preview_dialog(self, preview_text: str) -> None:
         dialog = QDialog(self)
