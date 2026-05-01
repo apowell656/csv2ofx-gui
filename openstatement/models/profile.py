@@ -25,6 +25,7 @@ class BankProfile:
     currency: str
     auto_parse_filename_metadata: bool
     filename_pattern: str
+    has_header: bool
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "BankProfile":
@@ -43,6 +44,7 @@ class BankProfile:
             currency=raw.get("currency", "USD"),
             auto_parse_filename_metadata=bool(raw.get("auto_parse_filename_metadata", False)),
             filename_pattern=normalize_filename_pattern(raw.get("filename_pattern", DEFAULT_FILENAME_PATTERN)),
+            has_header=bool(raw.get("has_header", True)),
         )
 
 

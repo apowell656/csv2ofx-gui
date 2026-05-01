@@ -20,6 +20,7 @@ def _profile() -> BankProfile:
         currency="USD",
         auto_parse_filename_metadata=False,
         filename_pattern="{account_name}_{last8}_{statement_date}_{ending_balance}.csv",
+        has_header=True,
     )
 
 

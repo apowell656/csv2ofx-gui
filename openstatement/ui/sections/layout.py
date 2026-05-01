@@ -37,6 +37,19 @@ class UiSectionMixin:
             return (14, 14, 14, 14), 10
         return (14, 14, 14, 14), 11
 
+    def _effective_delimiter(self, raw: str) -> str:
+        text = (raw or "").strip()
+        if not text:
+            return ","
+        if text == r"\t":
+            return "\t"
+        return text[:1]
+
+    def _delimiter_for_input(self, delimiter: str) -> str:
+        if delimiter == "\t":
+            return r"\t"
+        return delimiter or ","
+
     def _build_ui(self) -> None:
         chevron_path = self._asset_path("chevron_down.svg")
         stylesheet = """
@@ -216,11 +229,14 @@ class UiSectionMixin:
         body.addLayout(path_row)
 
         self.delimiter_input = QLineEdit(",")
-        self.delimiter_input.setMaxLength(1)
+        self.delimiter_input.setMaxLength(2)
         self.delimiter_input.setMaximumWidth(56)
+        self.csv_has_header_check = QCheckBox("CSV has header row")
+        self.csv_has_header_check.setChecked(True)
+        self.csv_has_header_check.toggled.connect(self._on_header_setting_changed)
 
         delimiter_label = self._field_label("Delimiter")
-        delimiter_hint = QLabel("Usually ',' or '\\t' (tab)")
+        delimiter_hint = QLabel("Use ',' or enter '\\t' for tab")
         delimiter_hint.setObjectName("inlineHint")
 
         self.detected_label = QLabel("No CSV loaded")
@@ -241,6 +257,7 @@ class UiSectionMixin:
         meta_row.addWidget(self._field_label("Detection"), 0, 3)
         meta_row.addWidget(self.detected_label, 0, 4)
         body.addLayout(meta_row)
+        body.addWidget(self.csv_has_header_check)
 
         self.auto_parse_filename_check = QCheckBox("Auto-parse filename metadata")
         self.auto_parse_filename_check.toggled.connect(self._on_filename_metadata_settings_changed)
@@ -604,26 +621,42 @@ class UiSectionMixin:
         label.setObjectName("subsectionTitle")
         return label
 
-    def _set_combo_headers(self, combo: QComboBox, headers: list[str], include_empty: bool = True) -> None:
-        current = combo.currentText()
+    def _set_combo_headers(
+        self,
+        combo: QComboBox,
+        headers: list[str],
+        include_empty: bool = True,
+        display_labels: dict[str, str] | None = None,
+    ) -> None:
+        current_data = combo.currentData()
+        current_text = combo.currentText()
         combo.clear()
         if include_empty:
-            combo.addItem("")
-        combo.addItems(headers)
-        if current:
-            idx = combo.findText(current, Qt.MatchFixedString)
+            combo.addItem("", "")
+        for header in headers:
+            label = display_labels.get(header, header) if display_labels else header
+            combo.addItem(label, header)
+        if current_data:
+            idx = combo.findData(current_data, Qt.UserRole, Qt.MatchExactly)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+                return
+        if current_text:
+            idx = combo.findText(current_text, Qt.MatchFixedString)
             if idx >= 0:
                 combo.setCurrentIndex(idx)
 
-    def _set_headers(self, headers: list[str]) -> None:
+    def _set_headers(self, headers: list[str], display_labels: dict[str, str] | None = None) -> None:
         self.current_headers = headers
         for combo in self.mapping_combos.values():
-            self._set_combo_headers(combo, headers, include_empty=True)
-        self._set_combo_headers(self.debit_col, headers, include_empty=True)
-        self._set_combo_headers(self.credit_col, headers, include_empty=True)
+            self._set_combo_headers(combo, headers, include_empty=True, display_labels=display_labels)
+        self._set_combo_headers(self.debit_col, headers, include_empty=True, display_labels=display_labels)
+        self._set_combo_headers(self.credit_col, headers, include_empty=True, display_labels=display_labels)
 
     def _set_combo_value(self, combo: QComboBox, value: str) -> None:
-        idx = combo.findText(value, Qt.MatchFixedString)
+        idx = combo.findData(value, Qt.UserRole, Qt.MatchExactly)
+        if idx < 0:
+            idx = combo.findText(value, Qt.MatchFixedString)
         if idx >= 0:
             combo.setCurrentIndex(idx)
 
@@ -645,6 +678,7 @@ class UiSectionMixin:
         self.detected_label.setText("No CSV loaded")
         self.status_label.setText("No CSV loaded")
         self.current_headers = []
+        self.csv_has_header_check.setChecked(True)
 
         for combo in self.mapping_combos.values():
             combo.clear()

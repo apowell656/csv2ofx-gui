@@ -10,6 +10,22 @@ from ...services.filename_metadata import FilenameMetadata, parse_filename_metad
 
 
 class CsvSectionMixin:
+    def _build_headerless_display_labels(self, first_row: list[str]) -> dict[str, str]:
+        labels: dict[str, str] = {}
+        for idx, value in enumerate(first_row, start=1):
+            key = f"col_{idx}"
+            sample = " ".join(str(value).split()).strip()
+            if len(sample) > 28:
+                sample = sample[:28].rstrip() + "..."
+            labels[key] = f"{key} ({sample})" if sample else key
+        return labels
+
+    def _on_header_setting_changed(self, *_args) -> None:
+        source = self.csv_path_input.text().strip()
+        if not source:
+            return
+        self.load_csv_headers(source)
+
     def choose_csv(self) -> None:
         start_dir = str(Path.home())
         path, _ = QFileDialog.getOpenFileName(
@@ -26,21 +42,29 @@ class CsvSectionMixin:
         self.load_csv_headers(path)
 
     def load_csv_headers(self, path: str) -> None:
-        delimiter = self.delimiter_input.text() or ","
+        delimiter = self._effective_delimiter(self.delimiter_input.text())
+        has_header = self.csv_has_header_check.isChecked()
         source_path = Path(path)
 
         try:
             with open(path, "r", encoding="utf-8-sig", newline="") as handle:
                 reader = csv.reader(handle, delimiter=delimiter)
-                headers = next(reader)
+                first_row = next(reader)
         except (OSError, StopIteration, csv.Error) as exc:
             QMessageBox.critical(self, "CSV Error", f"Could not read CSV headers:\n{exc}")
             self.status_label.setText("CSV load failed")
             return
 
-        headers = [h.strip() for h in headers]
-        self._set_headers(headers)
-        self._guess_default_fields(headers)
+        if has_header:
+            headers = [h.strip() for h in first_row]
+            display_labels = None
+        else:
+            headers = [f"col_{idx}" for idx in range(1, len(first_row) + 1)]
+            display_labels = self._build_headerless_display_labels(first_row)
+
+        self._set_headers(headers, display_labels=display_labels)
+        if has_header:
+            self._guess_default_fields(headers)
         metadata = self._refresh_filename_metadata(source_path)
         self._detect_saved_profile(headers, metadata)
         self.status_label.setText(source_path.name)
@@ -114,6 +138,7 @@ class CsvSectionMixin:
 
     def _detect_saved_profile(self, headers: list[str], metadata: FilenameMetadata | None = None) -> None:
         signature = [normalize_header(h) for h in headers]
+        csv_has_header = self.csv_has_header_check.isChecked()
         ranked: list[tuple[int, int, int, str, object]] = []
 
         for profile in self.profiles.values():
@@ -121,7 +146,7 @@ class CsvSectionMixin:
             metadata_score = 0
             header_score = 0
             reasons: list[str] = []
-            exact_header_match = profile.headers == signature
+            exact_header_match = csv_has_header and profile.has_header and profile.headers == signature
 
             if exact_header_match:
                 header_score += 25

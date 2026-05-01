@@ -22,6 +22,15 @@ class OfxMetadataOverrides:
     ending_balance: str = ""
 
 
+def _mapping_column_name(column: str, has_header: bool) -> str:
+    if has_header:
+        return column
+    match = re.fullmatch(r"col_(\d+)", (column or "").strip(), flags=re.IGNORECASE)
+    if match:
+        return f"column_{match.group(1)}"
+    return column
+
+
 def find_csv2ofx_binary() -> str | None:
     binary = shutil.which("csv2ofx")
     if binary:
@@ -36,8 +45,13 @@ def find_csv2ofx_binary() -> str | None:
 def mapped_columns_missing(source_csv: Path, profile: BankProfile) -> list[str]:
     try:
         with source_csv.open("r", encoding="utf-8-sig", newline="") as src:
-            reader = csv.DictReader(src, delimiter=profile.delimiter)
-            headers = set(reader.fieldnames or [])
+            if profile.has_header:
+                reader = csv.DictReader(src, delimiter=profile.delimiter)
+                headers = set(reader.fieldnames or [])
+            else:
+                reader = csv.reader(src, delimiter=profile.delimiter)
+                first_row = next(reader, [])
+                headers = {f"col_{idx}" for idx in range(1, len(first_row) + 1)}
     except OSError as exc:
         return [f"Could not read CSV: {exc}"]
 
@@ -246,7 +260,9 @@ def format_preview(ofx_content: str, max_rows: int = 20) -> str:
 def write_mapping_file(mapping_file: Path, profile: BankProfile) -> None:
     fallback_account = profile.name or "Account"
     fallback_bank = profile.name or "Bank"
-    amount_col = profile.field_map.get("amount", "")
+    amount_col = _mapping_column_name(profile.field_map.get("amount", ""), profile.has_header)
+    debit_col = _mapping_column_name(profile.debit_col, profile.has_header)
+    credit_col = _mapping_column_name(profile.credit_col, profile.has_header)
 
     lines = [
         "from operator import itemgetter",
@@ -266,21 +282,21 @@ def write_mapping_file(mapping_file: Path, profile: BankProfile) -> None:
         "    return -amount if negative else amount",
         "",
         "def _split_amount(record):",
-        f"    debit = _to_float(record.get({quote_py_string(profile.debit_col)}, ''))",
-        f"    credit = _to_float(record.get({quote_py_string(profile.credit_col)}, ''))",
+        f"    debit = _to_float(record.get({quote_py_string(debit_col)}, ''))",
+        f"    credit = _to_float(record.get({quote_py_string(credit_col)}, ''))",
         "    return credit - abs(debit)",
         "",
         "def _amount(record):",
         f"    return _to_float(record.get({quote_py_string(amount_col)}, ''))",
         "",
         "mapping = {",
-        "    'has_header': True,",
+        f"    'has_header': {profile.has_header},",
         f"    'delimiter': {quote_py_string(profile.delimiter or ',')},",
         f"    'currency': {quote_py_string(profile.currency)},",
         f"    'account_id': {quote_py_string(profile.account_id or to_account_id(profile.name))},",
     ]
 
-    date_col = profile.field_map["date"]
+    date_col = _mapping_column_name(profile.field_map["date"], profile.has_header)
     lines.append(f"    'date': itemgetter({quote_py_string(date_col)}),")
 
     if profile.use_split_amounts:
@@ -290,12 +306,14 @@ def write_mapping_file(mapping_file: Path, profile: BankProfile) -> None:
 
     account_col = profile.field_map.get("account")
     if account_col:
+        account_col = _mapping_column_name(account_col, profile.has_header)
         lines.append(f"    'account': itemgetter({quote_py_string(account_col)}),")
     else:
         lines.append(f"    'account': {quote_py_string(fallback_account)},")
 
     bank_col = profile.field_map.get("bank")
     if bank_col:
+        bank_col = _mapping_column_name(bank_col, profile.has_header)
         lines.append(f"    'bank': itemgetter({quote_py_string(bank_col)}),")
     else:
         lines.append(f"    'bank': {quote_py_string(fallback_bank)},")
@@ -303,6 +321,7 @@ def write_mapping_file(mapping_file: Path, profile: BankProfile) -> None:
     for field in ["payee", "desc", "notes", "check_num", "id", "balance", "class"]:
         col = profile.field_map.get(field)
         if col:
+            col = _mapping_column_name(col, profile.has_header)
             lines.append(f"    '{field}': itemgetter({quote_py_string(col)}),")
 
     if profile.date_format:
