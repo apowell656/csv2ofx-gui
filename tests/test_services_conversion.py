@@ -34,6 +34,7 @@ def make_profile(*, split: bool = False) -> BankProfile:
         currency="USD",
         auto_parse_filename_metadata=False,
         filename_pattern="{account_name}_{last8}_{statement_date}_{ending_balance}.csv",
+        has_header=True,
     )
 
 
@@ -87,6 +88,7 @@ def test_write_mapping_file_contains_expected_keys(tmp_path: Path) -> None:
     write_mapping_file(target, make_profile(split=True))
     text = target.read_text(encoding="utf-8")
     assert "'amount': _split_amount" in text
+    assert "'has_header': True" in text
     assert "'dayfirst': True" in text
     assert "'parse_fmt': '%m/%d/%Y'" in text
 
@@ -101,6 +103,31 @@ def test_write_mapping_file_non_split_amount_parser_handles_blank_and_currency(t
 
     assert amount_fn({"Amount": ""}) == 0.0
     assert amount_fn({"Amount": "$1,234.56"}) == 1234.56
+
+
+def test_write_mapping_file_no_header_uses_csv2ofx_column_names(tmp_path: Path) -> None:
+    target = tmp_path / "mapping.py"
+    profile = make_profile(split=False)
+    profile.has_header = False
+    profile.field_map = {"date": "col_1", "amount": "col_2", "payee": "col_3"}
+    write_mapping_file(target, profile)
+    text = target.read_text(encoding="utf-8")
+    assert "'has_header': False" in text
+    assert "itemgetter('column_1')" in text
+    assert "record.get('column_2'" in text
+    assert "itemgetter('column_3')" in text
+
+
+def test_mapped_columns_missing_no_header_uses_generated_columns(tmp_path: Path) -> None:
+    csv_path = tmp_path / "source.csv"
+    csv_path.write_text("2026-01-01,10,Store\n2026-01-02,11,Cafe\n", encoding="utf-8")
+
+    profile = make_profile(split=False)
+    profile.has_header = False
+    profile.field_map = {"date": "col_1", "amount": "col_2", "payee": "col_3"}
+
+    missing = mapped_columns_missing(csv_path, profile)
+    assert missing == []
 
 
 def test_run_conversion_raises_on_error(monkeypatch, tmp_path: Path) -> None:

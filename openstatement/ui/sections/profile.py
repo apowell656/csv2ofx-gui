@@ -37,13 +37,14 @@ class ProfileSectionMixin:
 
     def _load_profile_to_ui(self, profile: BankProfile) -> None:
         self.bank_name_input.setText(profile.name)
-        self.delimiter_input.setText(profile.delimiter or ",")
+        self.delimiter_input.setText(self._delimiter_for_input(profile.delimiter))
         self.date_format_input.setText(profile.date_format)
         self.dayfirst_check.setChecked(profile.dayfirst)
         self.account_id_input.setText(profile.account_id)
         self.currency_input.setText(profile.currency)
         self.auto_parse_filename_check.setChecked(profile.auto_parse_filename_metadata)
         self.filename_pattern_input.setText(normalize_filename_pattern(profile.filename_pattern))
+        self.csv_has_header_check.setChecked(profile.has_header)
 
         type_idx = self.account_type_combo.findText(profile.account_type, Qt.MatchFixedString)
         if type_idx >= 0:
@@ -59,17 +60,17 @@ class ProfileSectionMixin:
     def _build_profile_from_ui(self) -> BankProfile:
         name = self.bank_name_input.text().strip()
         field_map = {
-            field: combo.currentText().strip()
+            field: str(combo.currentData() or combo.currentText()).strip()
             for field, combo in self.mapping_combos.items()
-            if combo.currentText().strip()
+            if str(combo.currentData() or combo.currentText()).strip()
         }
         return BankProfile(
             name=name,
             headers=[normalize_header(h) for h in self.current_headers],
-            delimiter=(self.delimiter_input.text() or ",")[:1],
+            delimiter=self._effective_delimiter(self.delimiter_input.text()),
             field_map=field_map,
-            debit_col=self.debit_col.currentText().strip(),
-            credit_col=self.credit_col.currentText().strip(),
+            debit_col=str(self.debit_col.currentData() or self.debit_col.currentText()).strip(),
+            credit_col=str(self.credit_col.currentData() or self.credit_col.currentText()).strip(),
             use_split_amounts=self.use_split_amounts.isChecked(),
             date_format=self.date_format_input.text().strip(),
             dayfirst=self.dayfirst_check.isChecked(),
@@ -81,6 +82,7 @@ class ProfileSectionMixin:
                 normalize_filename_pattern(self.filename_pattern_input.text())
                 or DEFAULT_FILENAME_PATTERN
             ),
+            has_header=self.csv_has_header_check.isChecked(),
         )
 
     def save_profile(self) -> None:
@@ -245,6 +247,7 @@ class ProfileSectionMixin:
             f"Day-first Dates: {'Yes' if profile.dayfirst else 'No'}\n"
             f"Auto-parse Filename Metadata: {'Yes' if profile.auto_parse_filename_metadata else 'No'}\n"
             f"Filename Pattern: {profile.filename_pattern}\n"
+            f"CSV Has Header Row: {'Yes' if profile.has_header else 'No'}\n"
             f"Use Split Amounts: {'Yes' if profile.use_split_amounts else 'No'}\n\n"
             f"Headers:\n{headers_text}\n\n"
             f"Field Mappings:\n{mappings_text}"

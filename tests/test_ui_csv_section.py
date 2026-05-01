@@ -21,6 +21,7 @@ def _profile(name: str) -> BankProfile:
         currency="USD",
         auto_parse_filename_metadata=False,
         filename_pattern="{account_name}_{last8}_{statement_date}_{ending_balance}.csv",
+        has_header=True,
     )
 
 
@@ -83,3 +84,27 @@ def test_refresh_filename_metadata_sets_detected_values(qapp, monkeypatch) -> No
     assert window.filename_account_input.text() == "31676003"
     assert window.bank_name_input.text() == "Checking"
     assert window.account_id_input.text() == "31676003"
+
+
+def test_load_csv_headers_without_header_generates_column_names(qapp, tmp_path: Path) -> None:
+    window = MainWindow()
+    csv_path = tmp_path / "no_header.csv"
+    csv_path.write_text("2026-01-01,10.25,Store\n", encoding="utf-8")
+    window.csv_has_header_check.setChecked(False)
+
+    window.load_csv_headers(str(csv_path))
+
+    assert window.current_headers == ["col_1", "col_2", "col_3"]
+    assert window.mapping_combos["date"].itemText(1).startswith("col_1 (2026-01-01)")
+    assert window.mapping_combos["date"].itemData(1) == "col_1"
+
+
+def test_load_csv_headers_supports_tab_delimiter_token(qapp, tmp_path: Path) -> None:
+    window = MainWindow()
+    csv_path = tmp_path / "tab_file.csv"
+    csv_path.write_text("Date\tAmount\tDesc\n2026-01-01\t10\tStore\n", encoding="utf-8")
+    window.delimiter_input.setText(r"\t")
+
+    window.load_csv_headers(str(csv_path))
+
+    assert window.current_headers == ["Date", "Amount", "Desc"]
