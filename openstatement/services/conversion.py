@@ -5,14 +5,22 @@ import re
 import shutil
 import subprocess
 import tempfile
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from dateutil.parser import parse as parse_date
+
 from ..models.profile import BankProfile, quote_py_string, to_account_id
 
+INVALID_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]')
+
 CSV2OFX_MODULE_RUNNER = "__csv2ofx_module__"
+
+
+class CsvPreprocessingError(ValueError):
+    """Raised when leading/trailing row skip settings leave no usable CSV content."""
 
 
 @dataclass
@@ -42,24 +50,123 @@ def find_csv2ofx_binary() -> str | None:
     return None
 
 
+def compute_effective_rows(rows: list[list[str]], profile: BankProfile) -> list[list[str]]:
+    leading = max(0, profile.leading_rows_to_skip)
+    trailing = max(0, profile.trailing_rows_to_skip)
+    end = len(rows) - trailing if trailing else len(rows)
+    effective = rows[leading:end] if end > leading else []
+
+    if not effective:
+        if profile.has_header:
+            raise CsvPreprocessingError(
+                "The row skip settings remove all rows from this CSV, including the header row. "
+                "Reduce the leading or trailing rows to skip."
+            )
+        raise CsvPreprocessingError(
+            "The row skip settings remove all rows from this CSV. "
+            "Reduce the leading or trailing rows to skip."
+        )
+
+    return effective
+
+
+@contextmanager
+def effective_source_csv(source_csv: Path, profile: BankProfile):
+    """Yield the CSV path csv2ofx should read: the source unchanged, or a trimmed copy."""
+    if profile.leading_rows_to_skip <= 0 and profile.trailing_rows_to_skip <= 0:
+        yield source_csv
+        return
+
+    with source_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.reader(handle, delimiter=profile.delimiter))
+
+    effective_rows = compute_effective_rows(rows, profile)
+
+    with tempfile.TemporaryDirectory(prefix="openstatement_trim_") as temp_dir:
+        trimmed_path = Path(temp_dir) / source_csv.name
+        with trimmed_path.open("w", encoding="utf-8", newline="") as handle:
+            csv.writer(handle, delimiter=profile.delimiter).writerows(effective_rows)
+        yield trimmed_path
+
+
 def mapped_columns_missing(source_csv: Path, profile: BankProfile) -> list[str]:
     try:
-        with source_csv.open("r", encoding="utf-8-sig", newline="") as src:
-            if profile.has_header:
-                reader = csv.DictReader(src, delimiter=profile.delimiter)
-                headers = set(reader.fieldnames or [])
-            else:
-                reader = csv.reader(src, delimiter=profile.delimiter)
-                first_row = next(reader, [])
-                headers = {f"col_{idx}" for idx in range(1, len(first_row) + 1)}
+        with effective_source_csv(source_csv, profile) as effective_csv:
+            with effective_csv.open("r", encoding="utf-8-sig", newline="") as src:
+                if profile.has_header:
+                    reader = csv.DictReader(src, delimiter=profile.delimiter)
+                    headers = set(reader.fieldnames or [])
+                else:
+                    reader = csv.reader(src, delimiter=profile.delimiter)
+                    first_row = next(reader, [])
+                    headers = {f"col_{idx}" for idx in range(1, len(first_row) + 1)}
     except OSError as exc:
         return [f"Could not read CSV: {exc}"]
+    except CsvPreprocessingError as exc:
+        return [str(exc)]
 
     required = [value for value in profile.field_map.values() if value]
     if profile.use_split_amounts:
         required.extend([profile.debit_col, profile.credit_col])
 
     return [col for col in required if col and col not in headers]
+
+
+def _parse_row_date(value: str, profile: BankProfile) -> datetime | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+
+    try:
+        if profile.date_format:
+            return datetime.strptime(text, profile.date_format)
+        return parse_date(text, dayfirst=profile.dayfirst)
+    except (ValueError, OverflowError):
+        return None
+
+
+def latest_transaction_date(source_csv: Path, profile: BankProfile) -> datetime | None:
+    """Return the most recent transaction date found in the effective CSV, or None."""
+    date_col = (profile.field_map or {}).get("date", "")
+    if not date_col:
+        return None
+
+    try:
+        with effective_source_csv(source_csv, profile) as effective_csv:
+            with effective_csv.open("r", encoding="utf-8-sig", newline="") as src:
+                if profile.has_header:
+                    reader = csv.DictReader(src, delimiter=profile.delimiter)
+                    raw_values = [row.get(date_col, "") for row in reader]
+                else:
+                    match = re.fullmatch(r"col_(\d+)", date_col.strip(), flags=re.IGNORECASE)
+                    if not match:
+                        return None
+                    idx = int(match.group(1)) - 1
+                    reader = csv.reader(src, delimiter=profile.delimiter)
+                    raw_values = [row[idx] for row in reader if len(row) > idx]
+    except (OSError, csv.Error, CsvPreprocessingError):
+        return None
+
+    parsed_dates = [d for d in (_parse_row_date(v, profile) for v in raw_values) if d is not None]
+    return max(parsed_dates) if parsed_dates else None
+
+
+def _sanitize_filename_part(value: str) -> str:
+    return INVALID_FILENAME_CHARS.sub("_", (value or "").strip()).strip()
+
+
+def suggested_export_filename(source_csv: Path, profile: BankProfile) -> str:
+    """Build a default OFX export filename from the profile and the CSV's latest transaction date."""
+    account_name = _sanitize_filename_part(profile.name) or "Account"
+    account_id = _sanitize_filename_part(profile.account_id) or to_account_id(profile.name)
+
+    parts = [part for part in (account_name, account_id) if part]
+
+    latest_date = latest_transaction_date(source_csv, profile)
+    if latest_date is not None:
+        parts.append(latest_date.strftime("%Y-%m-%d"))
+
+    return "_".join(parts) + ".ofx"
 
 
 def run_conversion(
@@ -73,20 +180,21 @@ def run_conversion(
         mapping_file = Path(temp_dir) / "mapping.py"
         write_mapping_file(mapping_file, profile)
 
-        args = [
-            "-x",
-            str(mapping_file),
-            "-a",
-            profile.account_type,
-            "-o",
-            str(source_csv),
-            str(destination_ofx),
-        ]
+        with effective_source_csv(source_csv, profile) as effective_csv:
+            args = [
+                "-x",
+                str(mapping_file),
+                "-a",
+                profile.account_type,
+                "-o",
+                str(effective_csv),
+                str(destination_ofx),
+            ]
 
-        if csv2ofx_bin == CSV2OFX_MODULE_RUNNER:
-            _run_csv2ofx_module(args)
-        else:
-            _run_csv2ofx_subprocess([csv2ofx_bin, *args])
+            if csv2ofx_bin == CSV2OFX_MODULE_RUNNER:
+                _run_csv2ofx_module(args)
+            else:
+                _run_csv2ofx_subprocess([csv2ofx_bin, *args])
 
     if overrides:
         apply_ofx_overrides(destination_ofx, overrides)

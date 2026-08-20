@@ -36,8 +36,10 @@ OpenStatement is meant to complement `csv2ofx`, not replace it. It adds a UI, wo
 - Auto-detects likely saved profiles from CSV headers plus parsed filename metadata
 - Optional filename metadata parsing with customizable patterns (account, statement date, ending balance)
 - Validates mapped columns against the selected CSV before conversion
+- Supports bank CSVs containing introductory or summary rows by allowing leading and trailing rows to be ignored
 - OFX preview dialog to inspect parsed transactions before writing output
 - Adds missing OFX metadata when available (`ACCTID`, `LEDGERBAL/BALAMT`, `LEDGERBAL/DTASOF`)
+- Suggests an export filename from the bank profile and the CSV's latest transaction date
 
 
 ## Quick Start

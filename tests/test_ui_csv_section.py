@@ -108,3 +108,69 @@ def test_load_csv_headers_supports_tab_delimiter_token(qapp, tmp_path: Path) -> 
     window.load_csv_headers(str(csv_path))
 
     assert window.current_headers == ["Date", "Amount", "Desc"]
+
+
+def test_load_csv_headers_respects_leading_rows_to_skip_with_header(qapp, tmp_path: Path) -> None:
+    window = MainWindow()
+    csv_path = tmp_path / "with_metadata.csv"
+    csv_path.write_text(
+        "Bank Statement\nAccount 123\nDate,Description,Amount\n2026-01-01,Coffee,-5.00\n",
+        encoding="utf-8",
+    )
+    window.leading_rows_spin.setValue(2)
+
+    window.load_csv_headers(str(csv_path))
+
+    assert window.current_headers == ["Date", "Description", "Amount"]
+
+
+def test_load_csv_headers_respects_leading_rows_to_skip_without_header(qapp, tmp_path: Path) -> None:
+    window = MainWindow()
+    csv_path = tmp_path / "with_metadata_no_header.csv"
+    csv_path.write_text(
+        "Bank Statement\nAccount 123\n2026-01-01,Coffee,-5.00\n",
+        encoding="utf-8",
+    )
+    window.csv_has_header_check.setChecked(False)
+    window.leading_rows_spin.setValue(2)
+
+    window.load_csv_headers(str(csv_path))
+
+    assert window.current_headers == ["col_1", "col_2", "col_3"]
+    assert window.mapping_combos["date"].itemText(1).startswith("col_1 (2026-01-01)")
+
+
+def test_load_csv_headers_leading_rows_exceeding_file_shows_clean_error(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    window = MainWindow()
+    csv_path = tmp_path / "short.csv"
+    csv_path.write_text("Date,Amount\n2026-01-01,10\n", encoding="utf-8")
+    window.leading_rows_spin.setValue(10)
+
+    messages = []
+    monkeypatch.setattr(
+        "openstatement.ui.sections.csv.QMessageBox.critical",
+        lambda *_args: messages.append("error"),
+    )
+
+    window.load_csv_headers(str(csv_path))
+
+    assert messages
+    assert window.status_label.text() == "CSV load failed"
+
+
+def test_changing_leading_rows_spin_reloads_currently_selected_csv(qapp, tmp_path: Path) -> None:
+    window = MainWindow()
+    csv_path = tmp_path / "with_metadata.csv"
+    csv_path.write_text(
+        "Bank Statement\nDate,Amount\n2026-01-01,10\n",
+        encoding="utf-8",
+    )
+    window.csv_path_input.setText(str(csv_path))
+    window.load_csv_headers(str(csv_path))
+    assert window.current_headers == ["Bank Statement"]
+
+    window.leading_rows_spin.setValue(1)
+
+    assert window.current_headers == ["Date", "Amount"]

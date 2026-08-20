@@ -44,13 +44,25 @@ class CsvSectionMixin:
     def load_csv_headers(self, path: str) -> None:
         delimiter = self._effective_delimiter(self.delimiter_input.text())
         has_header = self.csv_has_header_check.isChecked()
+        leading_rows_to_skip = self.leading_rows_spin.value()
         source_path = Path(path)
 
         try:
             with open(path, "r", encoding="utf-8-sig", newline="") as handle:
                 reader = csv.reader(handle, delimiter=delimiter)
+                for _ in range(leading_rows_to_skip):
+                    next(reader)
                 first_row = next(reader)
-        except (OSError, StopIteration, csv.Error) as exc:
+        except StopIteration:
+            QMessageBox.critical(
+                self,
+                "CSV Error",
+                "Leading rows to skip removes all rows from this CSV. "
+                "Reduce the leading rows to skip.",
+            )
+            self.status_label.setText("CSV load failed")
+            return
+        except (OSError, csv.Error) as exc:
             QMessageBox.critical(self, "CSV Error", f"Could not read CSV headers:\n{exc}")
             self.status_label.setText("CSV load failed")
             return

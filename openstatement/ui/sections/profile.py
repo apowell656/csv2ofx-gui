@@ -44,7 +44,18 @@ class ProfileSectionMixin:
         self.currency_input.setText(profile.currency)
         self.auto_parse_filename_check.setChecked(profile.auto_parse_filename_metadata)
         self.filename_pattern_input.setText(normalize_filename_pattern(profile.filename_pattern))
+
+        self.csv_has_header_check.blockSignals(True)
         self.csv_has_header_check.setChecked(profile.has_header)
+        self.csv_has_header_check.blockSignals(False)
+
+        self.leading_rows_spin.blockSignals(True)
+        self.leading_rows_spin.setValue(profile.leading_rows_to_skip)
+        self.leading_rows_spin.blockSignals(False)
+
+        self.trailing_rows_spin.setValue(profile.trailing_rows_to_skip)
+
+        self._on_header_setting_changed()
 
         type_idx = self.account_type_combo.findText(profile.account_type, Qt.MatchFixedString)
         if type_idx >= 0:
@@ -83,6 +94,8 @@ class ProfileSectionMixin:
                 or DEFAULT_FILENAME_PATTERN
             ),
             has_header=self.csv_has_header_check.isChecked(),
+            leading_rows_to_skip=self.leading_rows_spin.value(),
+            trailing_rows_to_skip=self.trailing_rows_spin.value(),
         )
 
     def save_profile(self) -> None:
@@ -247,6 +260,8 @@ class ProfileSectionMixin:
             f"Day-first Dates: {'Yes' if profile.dayfirst else 'No'}\n"
             f"Auto-parse Filename Metadata: {'Yes' if profile.auto_parse_filename_metadata else 'No'}\n"
             f"Filename Pattern: {profile.filename_pattern}\n"
+            f"Leading Rows to Skip: {profile.leading_rows_to_skip}\n"
+            f"Trailing Rows to Skip: {profile.trailing_rows_to_skip}\n"
             f"CSV Has Header Row: {'Yes' if profile.has_header else 'No'}\n"
             f"Use Split Amounts: {'Yes' if profile.use_split_amounts else 'No'}\n\n"
             f"Headers:\n{headers_text}\n\n"

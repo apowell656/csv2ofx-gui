@@ -26,6 +26,8 @@ class BankProfile:
     auto_parse_filename_metadata: bool
     filename_pattern: str
     has_header: bool
+    leading_rows_to_skip: int = 0
+    trailing_rows_to_skip: int = 0
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "BankProfile":
@@ -45,6 +47,8 @@ class BankProfile:
             auto_parse_filename_metadata=bool(raw.get("auto_parse_filename_metadata", False)),
             filename_pattern=normalize_filename_pattern(raw.get("filename_pattern", DEFAULT_FILENAME_PATTERN)),
             has_header=bool(raw.get("has_header", True)),
+            leading_rows_to_skip=max(0, int(raw.get("leading_rows_to_skip", 0) or 0)),
+            trailing_rows_to_skip=max(0, int(raw.get("trailing_rows_to_skip", 0) or 0)),
         )
 
 

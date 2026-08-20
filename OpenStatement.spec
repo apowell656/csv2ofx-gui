@@ -19,6 +19,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(SPEC_DIR / 'openstatement' / 'ui' / 'assets' / 'chevron_down.svg'), 'openstatement/ui/assets'),
+        (str(SPEC_DIR / 'openstatement' / 'ui' / 'assets' / 'chevron_up.svg'), 'openstatement/ui/assets'),
         (str(WINDOWS_ICON), 'openstatement/build_assets/icons'),
         (str(MAC_ICON_PNG), 'openstatement/build_assets/icons/icon.iconset'),
     ],
