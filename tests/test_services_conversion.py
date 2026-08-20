@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,14 +7,19 @@ import pytest
 from openstatement.models.profile import BankProfile
 from openstatement.services.conversion import (
     CSV2OFX_MODULE_RUNNER,
+    CsvPreprocessingError,
     OfxMetadataOverrides,
     apply_ofx_overrides,
+    compute_effective_rows,
+    effective_source_csv,
     extract_tag,
     find_csv2ofx_binary,
     format_ofx_date,
     format_preview,
+    latest_transaction_date,
     mapped_columns_missing,
     run_conversion,
+    suggested_export_filename,
     write_mapping_file,
 )
 
@@ -128,6 +134,292 @@ def test_mapped_columns_missing_no_header_uses_generated_columns(tmp_path: Path)
 
     missing = mapped_columns_missing(csv_path, profile)
     assert missing == []
+
+
+def test_compute_effective_rows_zero_zero_returns_all_rows() -> None:
+    rows = [["Date", "Amount"], ["2026-01-01", "10"]]
+    assert compute_effective_rows(rows, make_profile()) == rows
+
+
+def test_compute_effective_rows_leading_and_trailing() -> None:
+    rows = [
+        ["Bank Statement"],
+        ["Account 123"],
+        ["Date", "Amount"],
+        ["2026-01-01", "10"],
+        ["2026-01-02", "20"],
+        ["Ending Balance", "30"],
+    ]
+    profile = make_profile()
+    profile.leading_rows_to_skip = 2
+    profile.trailing_rows_to_skip = 1
+
+    effective = compute_effective_rows(rows, profile)
+    assert effective == [["Date", "Amount"], ["2026-01-01", "10"], ["2026-01-02", "20"]]
+
+
+def test_compute_effective_rows_leading_only_no_header() -> None:
+    rows = [["Bank Statement"], ["Account 123"], ["2026-01-01", "Coffee", "-5.00"]]
+    profile = make_profile()
+    profile.has_header = False
+    profile.leading_rows_to_skip = 2
+
+    assert compute_effective_rows(rows, profile) == [["2026-01-01", "Coffee", "-5.00"]]
+
+
+def test_compute_effective_rows_all_removed_with_header_raises_clear_error() -> None:
+    rows = [["a"], ["b"], ["c"]]
+    profile = make_profile()
+    profile.has_header = True
+    profile.leading_rows_to_skip = 2
+    profile.trailing_rows_to_skip = 2
+
+    with pytest.raises(CsvPreprocessingError, match="header row"):
+        compute_effective_rows(rows, profile)
+
+
+def test_compute_effective_rows_all_removed_without_header_raises_clear_error() -> None:
+    rows = [["a"], ["b"]]
+    profile = make_profile()
+    profile.has_header = False
+    profile.leading_rows_to_skip = 5
+
+    with pytest.raises(CsvPreprocessingError):
+        compute_effective_rows(rows, profile)
+
+
+def test_compute_effective_rows_trailing_greater_than_available_rows_raises() -> None:
+    rows = [["a"], ["b"]]
+    profile = make_profile()
+    profile.trailing_rows_to_skip = 10
+
+    with pytest.raises(CsvPreprocessingError):
+        compute_effective_rows(rows, profile)
+
+
+def test_effective_source_csv_returns_original_path_when_no_skip(tmp_path: Path) -> None:
+    source = tmp_path / "in.csv"
+    source.write_text("Date,Amount\n2026-01-01,10\n", encoding="utf-8")
+
+    with effective_source_csv(source, make_profile()) as effective:
+        assert effective == source
+
+
+def test_effective_source_csv_trims_leading_and_trailing_rows(tmp_path: Path) -> None:
+    source = tmp_path / "in.csv"
+    source.write_text(
+        "Bank Statement\nDate,Amount\n2026-01-01,10\n2026-01-02,20\nEnding Balance,30\n",
+        encoding="utf-8",
+    )
+    profile = make_profile()
+    profile.leading_rows_to_skip = 1
+    profile.trailing_rows_to_skip = 1
+
+    with effective_source_csv(source, profile) as effective:
+        assert effective != source
+        content = effective.read_text(encoding="utf-8")
+
+    assert "Bank Statement" not in content
+    assert "Ending Balance" not in content
+    assert "Date,Amount" in content
+    assert "2026-01-02,20" in content
+
+
+def test_effective_source_csv_raises_clean_error_when_all_rows_removed(tmp_path: Path) -> None:
+    source = tmp_path / "in.csv"
+    source.write_text("a\nb\nc\n", encoding="utf-8")
+    profile = make_profile()
+    profile.leading_rows_to_skip = 3
+    profile.trailing_rows_to_skip = 2
+
+    with pytest.raises(CsvPreprocessingError):
+        with effective_source_csv(source, profile):
+            pass
+
+
+def test_mapped_columns_missing_uses_effective_header_after_leading_skip(tmp_path: Path) -> None:
+    csv_path = tmp_path / "source.csv"
+    csv_path.write_text(
+        "Account Summary\nDate,Amount,Payee\n2026-01-01,10,Store\n", encoding="utf-8"
+    )
+    profile = make_profile(split=False)
+    profile.leading_rows_to_skip = 1
+
+    assert mapped_columns_missing(csv_path, profile) == []
+
+
+def test_mapped_columns_missing_returns_error_message_when_all_rows_skipped(tmp_path: Path) -> None:
+    csv_path = tmp_path / "source.csv"
+    csv_path.write_text("Date,Amount\n2026-01-01,10\n", encoding="utf-8")
+    profile = make_profile()
+    profile.leading_rows_to_skip = 5
+
+    missing = mapped_columns_missing(csv_path, profile)
+    assert len(missing) == 1
+    assert "row skip settings" in missing[0]
+
+
+def test_latest_transaction_date_picks_max_date_with_header(tmp_path: Path) -> None:
+    csv_path = tmp_path / "source.csv"
+    csv_path.write_text(
+        "Date,Amount,Payee\n01/05/2026,10,A\n01/20/2026,20,B\n01/10/2026,15,C\n",
+        encoding="utf-8",
+    )
+    latest = latest_transaction_date(csv_path, make_profile())
+    assert latest == datetime(2026, 1, 20)
+
+
+def test_latest_transaction_date_headerless_uses_col_index(tmp_path: Path) -> None:
+    csv_path = tmp_path / "source.csv"
+    csv_path.write_text("01/05/2026,10,A\n01/20/2026,20,B\n", encoding="utf-8")
+
+    profile = make_profile()
+    profile.has_header = False
+    profile.field_map = {"date": "col_1", "amount": "col_2", "payee": "col_3"}
+
+    latest = latest_transaction_date(csv_path, profile)
+    assert latest == datetime(2026, 1, 20)
+
+
+def test_latest_transaction_date_respects_leading_and_trailing_skip(tmp_path: Path) -> None:
+    csv_path = tmp_path / "source.csv"
+    csv_path.write_text(
+        "Junk Metadata\nDate,Amount,Payee\n01/05/2026,10,A\n01/20/2026,20,B\nTotals,,\n",
+        encoding="utf-8",
+    )
+    profile = make_profile()
+    profile.leading_rows_to_skip = 1
+    profile.trailing_rows_to_skip = 1
+
+    latest = latest_transaction_date(csv_path, profile)
+    assert latest == datetime(2026, 1, 20)
+
+
+def test_latest_transaction_date_returns_none_when_unparseable(tmp_path: Path) -> None:
+    csv_path = tmp_path / "source.csv"
+    csv_path.write_text("Date,Amount,Payee\nn/a,10,A\nn/a,20,B\n", encoding="utf-8")
+
+    latest = latest_transaction_date(csv_path, make_profile())
+    assert latest is None
+
+
+def test_latest_transaction_date_uses_dateutil_when_no_date_format(tmp_path: Path) -> None:
+    csv_path = tmp_path / "source.csv"
+    csv_path.write_text("Date,Amount,Payee\n2026-01-05,10,A\n2026-01-20,20,B\n", encoding="utf-8")
+
+    profile = make_profile()
+    profile.date_format = ""
+    profile.dayfirst = False
+
+    latest = latest_transaction_date(csv_path, profile)
+    assert latest == datetime(2026, 1, 20)
+
+
+def test_suggested_export_filename_builds_expected_name(tmp_path: Path) -> None:
+    csv_path = tmp_path / "source.csv"
+    csv_path.write_text(
+        "Date,Amount,Payee\n01/05/2026,10,A\n01/20/2026,20,B\n", encoding="utf-8"
+    )
+    assert suggested_export_filename(csv_path, make_profile()) == "SECU_secu_2026-01-20.ofx"
+
+
+def test_suggested_export_filename_sanitizes_invalid_characters(tmp_path: Path) -> None:
+    csv_path = tmp_path / "source.csv"
+    csv_path.write_text("Date,Amount,Payee\n01/05/2026,10,A\n", encoding="utf-8")
+
+    profile = make_profile()
+    profile.name = "SECU/Checking:Primary"
+    profile.account_id = "secu"
+
+    name = suggested_export_filename(csv_path, profile)
+    assert "/" not in name
+    assert ":" not in name
+    assert name == "SECU_Checking_Primary_secu_2026-01-05.ofx"
+
+
+def test_suggested_export_filename_omits_date_when_none_found(tmp_path: Path) -> None:
+    csv_path = tmp_path / "source.csv"
+    csv_path.write_text("Date,Amount,Payee\n", encoding="utf-8")
+
+    assert suggested_export_filename(csv_path, make_profile()) == "SECU_secu.ofx"
+
+
+def test_suggested_export_filename_falls_back_account_id_when_blank(tmp_path: Path) -> None:
+    csv_path = tmp_path / "source.csv"
+    csv_path.write_text("Date,Amount,Payee\n01/05/2026,10,A\n", encoding="utf-8")
+
+    profile = make_profile()
+    profile.account_id = ""
+
+    name = suggested_export_filename(csv_path, profile)
+    assert name == "SECU_secu_2026-01-05.ofx"
+
+
+def test_run_conversion_zero_zero_uses_source_path_directly(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "in.csv"
+    dest = tmp_path / "out.ofx"
+    source.write_text("Date,Amount\n2026-01-01,10\n", encoding="utf-8")
+
+    captured = {}
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stderr="", stdout="ok")
+
+    monkeypatch.setattr("openstatement.services.conversion.subprocess.run", fake_run)
+
+    run_conversion("csv2ofx", source, dest, make_profile())
+    assert str(source) in captured["cmd"]
+
+
+def test_run_conversion_trims_rows_before_invoking_csv2ofx(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "in.csv"
+    source.write_text(
+        "Bank Statement\nDate,Amount\n2026-01-01,10\n2026-01-02,20\nEnding Balance,30\n",
+        encoding="utf-8",
+    )
+    dest = tmp_path / "out.ofx"
+    captured = {}
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        o_index = cmd.index("-o")
+        effective_path = Path(cmd[o_index + 1])
+        captured["content"] = effective_path.read_text(encoding="utf-8")
+        return SimpleNamespace(returncode=0, stderr="", stdout="ok")
+
+    monkeypatch.setattr("openstatement.services.conversion.subprocess.run", fake_run)
+
+    profile = make_profile()
+    profile.leading_rows_to_skip = 1
+    profile.trailing_rows_to_skip = 1
+
+    run_conversion("csv2ofx", source, dest, profile)
+
+    assert str(source) not in captured["cmd"]
+    assert "Bank Statement" not in captured["content"]
+    assert "Ending Balance" not in captured["content"]
+    assert "2026-01-02,20" in captured["content"]
+
+
+def test_run_conversion_raises_clean_error_when_row_skip_removes_everything(
+    monkeypatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "in.csv"
+    source.write_text("a\nb\nc\n", encoding="utf-8")
+    dest = tmp_path / "out.ofx"
+
+    def fake_run(*_args, **_kwargs):  # pragma: no cover - should not be called
+        raise AssertionError("csv2ofx should not run when preprocessing fails")
+
+    monkeypatch.setattr("openstatement.services.conversion.subprocess.run", fake_run)
+
+    profile = make_profile()
+    profile.leading_rows_to_skip = 3
+    profile.trailing_rows_to_skip = 2
+
+    with pytest.raises(CsvPreprocessingError):
+        run_conversion("csv2ofx", source, dest, profile)
 
 
 def test_run_conversion_raises_on_error(monkeypatch, tmp_path: Path) -> None:

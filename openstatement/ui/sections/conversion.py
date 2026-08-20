@@ -9,6 +9,7 @@ from ...services.conversion import (
     find_csv2ofx_binary,
     mapped_columns_missing,
     run_conversion,
+    suggested_export_filename,
 )
 from ...services.filename_metadata import normalize_balance, normalize_statement_date
 
@@ -20,7 +21,7 @@ class ConversionSectionMixin:
             return
         csv2ofx_bin, source_path, profile = prep
 
-        default_name = f"{source_path.stem}.ofx"
+        default_name = self._suggested_export_filename(source_path, profile)
         destination, _ = QFileDialog.getSaveFileName(
             self,
             "Save OFX file",
@@ -53,6 +54,12 @@ class ConversionSectionMixin:
             return
 
         self._show_preview_dialog(preview_text)
+
+    def _suggested_export_filename(self, source_path: Path, profile: BankProfile) -> str:
+        try:
+            return suggested_export_filename(source_path, profile)
+        except Exception:  # noqa: BLE001
+            return f"{source_path.stem}.ofx"
 
     def _resolve_source_csv_path(self) -> Path | None:
         csv_source = self.csv_path_input.text().strip()

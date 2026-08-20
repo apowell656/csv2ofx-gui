@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -52,6 +53,7 @@ class UiSectionMixin:
 
     def _build_ui(self) -> None:
         chevron_path = self._asset_path("chevron_down.svg")
+        chevron_up_path = self._asset_path("chevron_up.svg")
         stylesheet = """
             QMainWindow {
                 background: #f5f7fb;
@@ -107,7 +109,7 @@ class UiSectionMixin:
                 color: #475467;
                 font-size: 12px;
             }
-            QLineEdit, QComboBox {
+            QLineEdit, QComboBox, QSpinBox {
                 min-height: 36px;
                 padding: 0 10px;
                 border: 1px solid #d0d5dd;
@@ -115,7 +117,7 @@ class UiSectionMixin:
                 background: white;
                 color: #14213d;
             }
-            QLineEdit:focus, QComboBox:focus {
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
                 border: 1px solid #1f6fe5;
             }
             QComboBox {
@@ -134,6 +136,40 @@ class UiSectionMixin:
             QComboBox::down-arrow {
                 width: 10px;
                 height: 10px;
+                image: url(__CHEVRON_PATH__);
+            }
+            QSpinBox {
+                padding-right: 30px;
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                subcontrol-origin: padding;
+                width: 26px;
+                border-left: 1px solid #eaecf0;
+                background: #fcfcfd;
+            }
+            QSpinBox::up-button {
+                subcontrol-position: top right;
+                border-top-right-radius: 7px;
+            }
+            QSpinBox::down-button {
+                subcontrol-position: bottom right;
+                border-top: 1px solid #eaecf0;
+                border-bottom-right-radius: 7px;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background: #f2f4f7;
+            }
+            QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {
+                background: #eaecf0;
+            }
+            QSpinBox::up-arrow {
+                width: 8px;
+                height: 8px;
+                image: url(__CHEVRON_UP_PATH__);
+            }
+            QSpinBox::down-arrow {
+                width: 8px;
+                height: 8px;
                 image: url(__CHEVRON_PATH__);
             }
             QComboBox QAbstractItemView {
@@ -178,7 +214,9 @@ class UiSectionMixin:
                 border-radius: 10px;
             }
             """
-        self.setStyleSheet(stylesheet.replace("__CHEVRON_PATH__", chevron_path))
+        stylesheet = stylesheet.replace("__CHEVRON_PATH__", chevron_path)
+        stylesheet = stylesheet.replace("__CHEVRON_UP_PATH__", chevron_up_path)
+        self.setStyleSheet(stylesheet)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -257,6 +295,35 @@ class UiSectionMixin:
         meta_row.addWidget(self._field_label("Detection"), 0, 3)
         meta_row.addWidget(self.detected_label, 0, 4)
         body.addLayout(meta_row)
+
+        self.leading_rows_spin = QSpinBox()
+        self.leading_rows_spin.setRange(0, 999)
+        self.leading_rows_spin.setToolTip(
+            "Ignore non-transaction rows before the CSV header or first data row."
+        )
+        self.leading_rows_spin.valueChanged.connect(self._on_header_setting_changed)
+
+        self.trailing_rows_spin = QSpinBox()
+        self.trailing_rows_spin.setRange(0, 999)
+        self.trailing_rows_spin.setToolTip(
+            "Ignore summary or other non-transaction rows at the end of the CSV."
+        )
+
+        leading_label = self._field_label("Leading rows to skip")
+        leading_label.setToolTip(self.leading_rows_spin.toolTip())
+        trailing_label = self._field_label("Trailing rows to skip")
+        trailing_label.setToolTip(self.trailing_rows_spin.toolTip())
+
+        skip_row = QGridLayout()
+        skip_row.setHorizontalSpacing(12)
+        skip_row.setVerticalSpacing(8)
+        skip_row.setColumnStretch(4, 1)
+        skip_row.addWidget(leading_label, 0, 0)
+        skip_row.addWidget(self.leading_rows_spin, 0, 1)
+        skip_row.addWidget(trailing_label, 0, 2)
+        skip_row.addWidget(self.trailing_rows_spin, 0, 3)
+        body.addLayout(skip_row)
+
         body.addWidget(self.csv_has_header_check)
 
         self.auto_parse_filename_check = QCheckBox("Auto-parse filename metadata")
@@ -679,6 +746,8 @@ class UiSectionMixin:
         self.status_label.setText("No CSV loaded")
         self.current_headers = []
         self.csv_has_header_check.setChecked(True)
+        self.leading_rows_spin.setValue(0)
+        self.trailing_rows_spin.setValue(0)
 
         for combo in self.mapping_combos.values():
             combo.clear()

@@ -4,6 +4,26 @@ from openstatement.models.profile import BankProfile
 from openstatement.ui.main_window import MainWindow
 
 
+def _profile() -> BankProfile:
+    return BankProfile(
+        name="SECU",
+        headers=["date", "amount"],
+        delimiter=",",
+        field_map={"date": "Date", "amount": "Amount"},
+        debit_col="",
+        credit_col="",
+        use_split_amounts=False,
+        date_format="",
+        dayfirst=False,
+        account_type="CHECKING",
+        account_id="secu",
+        currency="USD",
+        auto_parse_filename_metadata=False,
+        filename_pattern="{account_name}_{last8}_{statement_date}_{ending_balance}.csv",
+        has_header=True,
+    )
+
+
 def test_validate_required_fields_missing_date_shows_warning(qapp, monkeypatch) -> None:
     window = MainWindow()
     messages = []
@@ -74,6 +94,46 @@ def test_build_profile_from_ui_accepts_tab_delimiter_token(qapp) -> None:
 
     profile = window._build_profile_from_ui()
     assert profile.delimiter == "\t"
+
+
+def test_build_profile_from_ui_captures_row_skip_settings(qapp) -> None:
+    window = MainWindow()
+    window._set_headers(["Date", "Amount"])
+    window.leading_rows_spin.setValue(3)
+    window.trailing_rows_spin.setValue(2)
+
+    date_idx = window.mapping_combos["date"].findText("Date")
+    amount_idx = window.mapping_combos["amount"].findText("Amount")
+    window.mapping_combos["date"].setCurrentIndex(date_idx)
+    window.mapping_combos["amount"].setCurrentIndex(amount_idx)
+
+    profile = window._build_profile_from_ui()
+
+    assert profile.leading_rows_to_skip == 3
+    assert profile.trailing_rows_to_skip == 2
+
+
+def test_load_profile_to_ui_restores_row_skip_settings(qapp) -> None:
+    window = MainWindow()
+    profile = _profile()
+    profile.leading_rows_to_skip = 4
+    profile.trailing_rows_to_skip = 1
+
+    window._load_profile_to_ui(profile)
+
+    assert window.leading_rows_spin.value() == 4
+    assert window.trailing_rows_spin.value() == 1
+
+
+def test_reset_form_clears_row_skip_settings(qapp) -> None:
+    window = MainWindow()
+    window.leading_rows_spin.setValue(5)
+    window.trailing_rows_spin.setValue(3)
+
+    window.reset_form()
+
+    assert window.leading_rows_spin.value() == 0
+    assert window.trailing_rows_spin.value() == 0
 
 
 def test_save_profile_requires_loaded_csv(qapp, monkeypatch) -> None:

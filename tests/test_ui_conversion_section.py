@@ -38,6 +38,32 @@ def test_resolve_source_csv_path_missing_warns(qapp, monkeypatch) -> None:
     assert messages
 
 
+def test_suggested_export_filename_uses_profile_and_latest_date(qapp, tmp_path: Path) -> None:
+    window = MainWindow()
+    source = tmp_path / "input.csv"
+    source.write_text("Date,Amount\n01/05/2026,10\n01/20/2026,20\n", encoding="utf-8")
+
+    name = window._suggested_export_filename(source, _profile())
+    assert name == "SECU_secu_2026-01-20.ofx"
+
+
+def test_suggested_export_filename_falls_back_on_error(qapp, monkeypatch, tmp_path: Path) -> None:
+    window = MainWindow()
+    source = tmp_path / "input.csv"
+    source.write_text("Date,Amount\n01/05/2026,10\n", encoding="utf-8")
+
+    def raise_error(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "openstatement.ui.sections.conversion.suggested_export_filename",
+        raise_error,
+    )
+
+    name = window._suggested_export_filename(source, _profile())
+    assert name == "input.ofx"
+
+
 def test_prepare_conversion_inputs_success(qapp, monkeypatch, tmp_path: Path) -> None:
     window = MainWindow()
     source = tmp_path / "input.csv"
