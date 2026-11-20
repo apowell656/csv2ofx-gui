@@ -1,11 +1,24 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import ast
 import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_submodules
 
 SPEC_DIR = Path(SPECPATH)
+# Read the project's version without requiring tomllib (local Python 3.10 builds).
+project_section = False
+APP_VERSION = None
+for line in (SPEC_DIR / "pyproject.toml").read_text(encoding="utf-8").splitlines():
+    line = line.strip()
+    if line.startswith("["):
+        project_section = line == "[project]"
+    elif project_section and line.partition("=")[0].strip() == "version":
+        APP_VERSION = ast.literal_eval(line.partition("=")[2].strip())
+        break
+if not isinstance(APP_VERSION, str) or not APP_VERSION:
+    raise ValueError("Missing [project].version in pyproject.toml")
 ICON_DIR = SPEC_DIR / "openstatement" / "build_assets" / "icons"
 WINDOWS_ICON = ICON_DIR / "openstatement_logo.ico"
 MAC_ICON = ICON_DIR / "openstatement_logo.icns"
@@ -90,4 +103,5 @@ if sys.platform == "darwin":
         name='OpenStatement.app',
         icon=MAC_ICON_PATH,
         bundle_identifier=None,
+        version=APP_VERSION,
     )
