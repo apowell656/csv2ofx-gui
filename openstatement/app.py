@@ -9,6 +9,9 @@ from .ui.main_window import MainWindow
 
 def main() -> None:
     app = QApplication(sys.argv)
+    # Name the app explicitly so saved profiles live in the same AppData folder
+    # whether it runs as the packaged app or from source (where Qt would use "Python").
+    app.setApplicationName("OpenStatement")
     app.setStyle(QStyleFactory.create("Fusion"))
     icon_path = app_icon_path()
     if icon_path is not None:
