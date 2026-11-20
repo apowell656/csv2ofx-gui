@@ -126,7 +126,7 @@ class ConversionSectionMixin:
     def _resolve_metadata_overrides(self, profile: BankProfile) -> OfxMetadataOverrides | None:
         account_id = self.filename_account_input.text().strip()
         date_text = normalize_statement_date(self.filename_date_input.text())
-        balance_text = normalize_balance(self.filename_balance_input.text())
+        balance_text = normalize_balance(self.filename_balance_input.text(), profile.decimal_separator)
 
         if self.filename_date_input.text().strip() and not date_text:
             self.filename_metadata_label.setText(

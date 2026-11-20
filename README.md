@@ -32,6 +32,7 @@ OpenStatement is meant to complement `csv2ofx`, not replace it. It adds a UI, wo
 - Desktop GUI for CSV-to-OFX conversion using `csv2ofx`
 - Auto-detects and maps common CSV headers (date, amount, payee, memo, ID, balance, etc.)
 - Supports both a single amount column and split debit/credit columns
+- International formats: decimal-comma amounts (`1.234,56`), day-first and year-first dates, localized month names, and auto-detected delimiter, date format, decimal separator, and currency
 - Saves reusable bank profiles including mappings, date options, delimiter, and account settings
 - Auto-detects likely saved profiles from CSV headers plus parsed filename metadata
 - Optional filename metadata parsing with customizable patterns (account, statement date, ending balance)
@@ -62,13 +63,28 @@ Prebuilt releases are available for:
 See the [Releases](https://github.com/apowell656/csv2ofx-gui/releases) page for the latest builds.
 
 
+## International CSV Formats
+
+When a CSV is loaded, OpenStatement inspects its values and fills in the Bank Profile settings it can infer
+(a saved profile you apply afterwards still takes precedence):
+
+- **Delimiter**: switches to `;`, tab, or `|` when the header row doesn't split on the current delimiter.
+- **Decimal separator**: period (`1,234.56`) or comma (`1.234,56`). Amounts may also use space or apostrophe
+  grouping (`1 234,56`, `1'234.56`), Indian grouping (`1,23,456.78`), currency symbols or codes, accounting
+  parentheses, trailing or Unicode minus signs (`12,50-`, `−12,50`), and `DR`/`CR` markers.
+- **Date parse format**: numeric (`%d.%m.%Y`, `%d/%m/%Y`, `%m/%d/%Y`, `%Y-%m-%d`, `%Y/%m/%d`, `%Y.%m.%d.`, ...),
+  with optional time of day, or with month names (`13 Nov 2026`, `13. Nov. 2026`, `13 de noviembre de 2026`).
+  Month names in English, German, French, Spanish, Italian, Portuguese, Dutch, Scandinavian languages, and
+  Polish are recognized. Ambiguous numeric dates such as `03/04/2026` are read day-first when the file uses
+  decimal commas or `Day-first dates` is checked, otherwise month-first.
+- **Currency**: set from unambiguous symbols (`€`, `£`, `R$`, `zł`, `₹`, ...), ISO codes in amounts, or a
+  currency column. Shared symbols such as `$` and `kr` leave the field unchanged.
+
+The `Date parse format` field is passed through to `csv2ofx`, so you can also type any `strftime`-style format.
+
 ## Optional Filename Metadata Parsing
 
 If a bank CSV omits account ID or statement summary fields, OpenStatement can parse metadata from the CSV filename.
-
-The `Date parse format` field in the Bank Profile section is passed through to `csv2ofx`, so it accepts common
-`strftime`-style date formats such as `%m/%d/%Y`, `%d/%m/%Y`, and `%Y-%m-%d`. If the CSV uses ambiguous numeric
-dates, enable `Day-first dates` when appropriate.
 
 Default pattern:
 

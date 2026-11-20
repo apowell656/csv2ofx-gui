@@ -174,3 +174,354 @@ def test_changing_leading_rows_spin_reloads_currently_selected_csv(qapp, tmp_pat
     window.leading_rows_spin.setValue(1)
 
     assert window.current_headers == ["Date", "Amount"]
+
+
+def test_load_german_csv_detects_delimiter_date_and_decimal(qapp, tmp_path: Path) -> None:
+    source = tmp_path / "konto.csv"
+    source.write_text(
+        "Buchungstag;Betrag;Empfaenger;Saldo\n"
+        "13.11.2026;-12,50;Baeckerei;1.222,06\n"
+        "14.11.2026;1.234,56;Gehalt;2.456,62\n",
+        encoding="utf-8",
+    )
+    window = MainWindow()
+    window.profiles = {}
+    window.csv_path_input.setText(str(source))
+    window.load_csv_headers(str(source))
+
+    assert window.delimiter_input.text() == ";"
+    assert window.current_headers == ["Buchungstag", "Betrag", "Empfaenger", "Saldo"]
+    assert window.mapping_combos["date"].currentText() == "Buchungstag"
+    assert window.mapping_combos["amount"].currentText() == "Betrag"
+    assert window.date_format_input.text() == "%d.%m.%Y"
+    assert window.decimal_separator_combo.currentData() == ","
+
+    profile = window._build_profile_from_ui()
+    assert profile.decimal_separator == ","
+
+
+def test_load_us_csv_keeps_us_defaults(qapp, tmp_path: Path) -> None:
+    source = tmp_path / "us.csv"
+    source.write_text("Date,Amount\n11/13/2026,-12.50\n11/14/2026,\"1,234.56\"\n", encoding="utf-8")
+    window = MainWindow()
+    window.profiles = {}
+    window.load_csv_headers(str(source))
+
+    assert window.delimiter_input.text() == ","
+    assert window.date_format_input.text() == "%m/%d/%Y"
+    assert window.decimal_separator_combo.currentData() == "."
+
+
+def test_load_csv_detects_currency_from_currency_column(qapp, tmp_path: Path) -> None:
+    source = tmp_path / "konto.csv"
+    source.write_text(
+        "Buchungstag;Betrag;Waehrung\n13.11.2026;-12,50;EUR\n14.11.2026;100,00;EUR\n",
+        encoding="utf-8",
+    )
+    window = MainWindow()
+    window.profiles = {}
+    window.load_csv_headers(str(source))
+
+    assert window.currency_input.text() == "EUR"
+
+
+def test_load_csv_ambiguous_dates_use_dayfirst_with_decimal_comma(qapp, tmp_path: Path) -> None:
+    source = tmp_path / "banco.csv"
+    source.write_text(
+        "Date;Amount\n03/04/2026;-12,50 €\n05/06/2026;1.234,56 €\n",
+        encoding="utf-8",
+    )
+    window = MainWindow()
+    window.profiles = {}
+    window.load_csv_headers(str(source))
+
+    assert window.decimal_separator_combo.currentData() == ","
+    assert window.date_format_input.text() == "%d/%m/%Y"
+    assert window.currency_input.text() == "EUR"
+
+
+def test_load_csv_with_localized_month_names(qapp, tmp_path: Path) -> None:
+    source = tmp_path / "releve.csv"
+    source.write_text(
+        "Date;Amount\n13 oct. 2026;-12,50\n14 nov. 2026;1 234,56\n",
+        encoding="utf-8",
+    )
+    window = MainWindow()
+    window.profiles = {}
+    window.load_csv_headers(str(source))
+
+    assert window.date_format_input.text() == "%d %b %Y"
+    assert window.decimal_separator_combo.currentData() == ","
+
+
+def _account_profile(name: str, account_id: str, **overrides) -> BankProfile:
+    profile = _profile(name)
+    profile.headers = ["date", "amount", "payee"]
+    profile.account_id = account_id
+    for key, value in overrides.items():
+        setattr(profile, key, value)
+    return profile
+
+
+class _DialogSpy:
+    def __init__(self, monkeypatch, choose: str | None = None, confirm: bool = True) -> None:
+        self.questions: list[str] = []
+        self.choosers: list[list[str]] = []
+        self._choose = choose
+        self._confirm = confirm
+        monkeypatch.setattr("openstatement.ui.sections.csv.QMessageBox.question", self.question)
+        monkeypatch.setattr("openstatement.ui.sections.csv.QInputDialog.getItem", self.get_item)
+
+    def question(self, _parent, _title, text, *_args, **_kwargs):
+        from PySide6.QtWidgets import QMessageBox
+
+        self.questions.append(text)
+        return QMessageBox.Yes if self._confirm else QMessageBox.No
+
+    def get_item(self, _parent, _title, _label, items, *_args, **_kwargs):
+        self.choosers.append(list(items))
+        if self._choose is None:
+            return "", False
+        return next(item for item in items if item.startswith(self._choose)), True
+
+    @property
+    def total(self) -> int:
+        return len(self.questions) + len(self.choosers)
+
+
+def _load(window: MainWindow, path: Path) -> None:
+    window.csv_path_input.setText(str(path))
+    window.load_csv_headers(str(path))
+
+
+def test_two_accounts_same_bank_lets_user_choose_once(qapp, monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "export.csv"
+    source.write_text("Date,Amount,Payee\n11/01/2026,1.00,X\n", encoding="utf-8")
+    spy = _DialogSpy(monkeypatch, choose="Bank Savings")
+    window = MainWindow()
+    window.profiles = {
+        "Bank Checking": _account_profile("Bank Checking", "1111"),
+        "Bank Savings": _account_profile("Bank Savings", "2222"),
+    }
+    window._refresh_profile_combo()
+
+    _load(window, source)
+
+    assert spy.questions == []
+    assert len(spy.choosers) == 1
+    assert spy.choosers[0][0].startswith("Bank Checking") and "1111" in spy.choosers[0][0]
+    assert "2222" in spy.choosers[0][1]
+    assert window.bank_name_input.text() == "Bank Savings"
+    assert window.account_id_input.text() == "2222"
+    assert window.profile_combo.currentText() == "Bank Savings"
+    assert "2 matching profiles" in window.detected_label.text()
+
+
+def test_choosing_nothing_applies_no_profile(qapp, monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "export.csv"
+    source.write_text("Date,Amount,Payee\n11/01/2026,1.00,X\n", encoding="utf-8")
+    spy = _DialogSpy(monkeypatch, choose=None)
+    window = MainWindow()
+    window.profiles = {
+        "Bank Checking": _account_profile("Bank Checking", "1111"),
+        "Bank Savings": _account_profile("Bank Savings", "2222"),
+    }
+
+    _load(window, source)
+
+    assert spy.total == 1
+    assert window.bank_name_input.text() == ""
+
+
+def test_filename_account_id_picks_single_profile_with_one_prompt(qapp, monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "Savings_2222_2026-11-01_100.00.csv"
+    source.write_text("Date,Amount,Payee\n11/01/2026,1.00,X\n", encoding="utf-8")
+    spy = _DialogSpy(monkeypatch)
+    window = MainWindow()
+    window.auto_parse_filename_check.setChecked(True)
+    window.profiles = {
+        "Bank Checking": _account_profile("Bank Checking", "1111", auto_parse_filename_metadata=True),
+        "Bank Savings": _account_profile("Bank Savings", "2222", auto_parse_filename_metadata=True),
+    }
+
+    _load(window, source)
+
+    assert spy.choosers == []
+    assert len(spy.questions) == 1 and "Bank Savings" in spy.questions[0]
+    assert window.bank_name_input.text() == "Bank Savings"
+    # Statement metadata from the filename is still filled in.
+    assert window.filename_balance_input.text() == "100.00"
+
+
+def test_applying_profile_that_changes_header_setting_prompts_once_and_keeps_values(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "Checking_1111_2026-11-01_100.00.csv"
+    source.write_text("13.11.2026;-12,50;Shop\n", encoding="utf-8")
+    spy = _DialogSpy(monkeypatch)
+    window = MainWindow()
+    window.auto_parse_filename_check.setChecked(True)
+    headerless = _account_profile(
+        "My Bank",
+        "1111",
+        has_header=False,
+        delimiter=";",
+        field_map={"date": "col_1", "amount": "col_2", "payee": "col_3"},
+        date_format="%d.%m.%Y",
+        decimal_separator=",",
+        currency="EUR",
+        auto_parse_filename_metadata=True,
+    )
+    window.profiles = {"My Bank": headerless}
+
+    _load(window, source)
+
+    assert spy.total == 1
+    assert window.csv_has_header_check.isChecked() is False
+    assert window.current_headers == ["col_1", "col_2", "col_3"]
+    assert window.mapping_combos["date"].currentData() == "col_1"
+    assert window.mapping_combos["amount"].currentData() == "col_2"
+    assert window.date_format_input.text() == "%d.%m.%Y"
+    assert window.decimal_separator_combo.currentData() == ","
+    assert window.currency_input.text() == "EUR"
+    assert window.bank_name_input.text() == "My Bank"
+
+
+def test_toggling_header_checkbox_does_not_prompt_again(qapp, monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "export.csv"
+    source.write_text("Date,Amount,Payee\n11/01/2026,1.00,X\n", encoding="utf-8")
+    spy = _DialogSpy(monkeypatch, confirm=False)
+    window = MainWindow()
+    window.profiles = {"Bank Checking": _account_profile("Bank Checking", "1111")}
+
+    _load(window, source)
+    window.csv_has_header_check.setChecked(False)
+    window.csv_has_header_check.setChecked(True)
+
+    assert spy.total == 1
+
+
+def test_selecting_profile_from_dropdown_never_prompts(qapp, monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "export.csv"
+    source.write_text("Date,Amount,Payee\n11/01/2026,1.00,X\n", encoding="utf-8")
+    spy = _DialogSpy(monkeypatch, choose=None)
+    window = MainWindow()
+    window.profiles = {
+        "Bank Checking": _account_profile("Bank Checking", "1111"),
+        "Bank Savings": _account_profile("Bank Savings", "2222", has_header=False),
+    }
+    window._refresh_profile_combo()
+    _load(window, source)
+    assert spy.total == 1
+
+    window.profile_combo.setCurrentIndex(window.profile_combo.findText("Bank Savings"))
+
+    assert spy.total == 1
+    assert window.bank_name_input.text() == "Bank Savings"
+    assert window.csv_has_header_check.isChecked() is False
+
+
+def test_account_number_column_picks_the_right_same_bank_account(qapp, monkeypatch, tmp_path: Path) -> None:
+    headers = ["date", "account", "account number", "description", "credit", "debit"]
+    everyday = _account_profile("Everyday", "12345678", headers=headers)
+    vacation = _account_profile("Vacation Fund", "87654321", headers=headers)
+    source = tmp_path / "export.csv"
+    source.write_text(
+        "Date,Account,Account Number,Description,Credit,Debit\n11/01/2026,Share,XXXX4321,Deposit,10.00,\n",
+        encoding="utf-8",
+    )
+    spy = _DialogSpy(monkeypatch)
+    window = MainWindow()
+    window.profiles = {"Everyday": everyday, "Vacation Fund": vacation}
+
+    _load(window, source)
+
+    assert spy.choosers == []
+    assert len(spy.questions) == 1 and "Vacation Fund" in spy.questions[0]
+    assert "account number in CSV" in spy.questions[0]
+    assert window.bank_name_input.text() == "Vacation Fund"
+
+
+def test_detection_ignores_skipped_preamble_and_footer_rows(qapp, tmp_path: Path) -> None:
+    source = tmp_path / "umsaetze.csv"
+    source.write_text(
+        "Kontoauszug ACME Bank\n"
+        "Zeitraum: 01.11.2026 - 14.11.2026\n"
+        "Buchungstag;Betrag;Empfaenger\n"
+        "13.11.2026;-12,50;Baeckerei\n"
+        "14.11.2026;1.234,56;Gehalt\n"
+        "Summe;1.222,06;\n",
+        encoding="utf-8",
+    )
+    window = MainWindow()
+    window.profiles = {}
+    window.trailing_rows_spin.setValue(1)
+    window.leading_rows_spin.blockSignals(True)
+    window.leading_rows_spin.setValue(2)
+    window.leading_rows_spin.blockSignals(False)
+
+    window.load_csv_headers(str(source))
+
+    assert window.delimiter_input.text() == ";"
+    assert window.current_headers == ["Buchungstag", "Betrag", "Empfaenger"]
+    assert window.date_format_input.text() == "%d.%m.%Y"
+    assert window.decimal_separator_combo.currentData() == ","
+
+
+def test_applying_profile_with_leading_rows_prompts_once(qapp, monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "Checking_12345678_2026-11-01_100.00.csv"
+    source.write_text(
+        "ACME Bank export\nDate,Amount,Payee\n11/01/2026,1.00,X\n",
+        encoding="utf-8",
+    )
+    spy = _DialogSpy(monkeypatch)
+    window = MainWindow()
+    window.auto_parse_filename_check.setChecked(True)
+    profile = _account_profile(
+        "Everyday",
+        "12345678",
+        leading_rows_to_skip=1,
+        trailing_rows_to_skip=0,
+        auto_parse_filename_metadata=True,
+        field_map={"date": "Date", "amount": "Amount", "payee": "Payee"},
+    )
+    window.profiles = {"Everyday": profile}
+
+    _load(window, source)
+
+    assert spy.total == 1
+    assert window.leading_rows_spin.value() == 1
+    assert window.current_headers == ["Date", "Amount", "Payee"]
+    assert window.mapping_combos["payee"].currentText() == "Payee"
+    assert window.bank_name_input.text() == "Everyday"
+
+
+def test_profile_matching_reads_file_with_each_profiles_row_skipping(qapp, monkeypatch, tmp_path: Path) -> None:
+    """A fresh form skips no rows, but the bank's export has a preamble: match as the profile would read it."""
+    headers = ["date", "account number", "description", "credit", "debit"]
+    common = dict(headers=headers, leading_rows_to_skip=2, trailing_rows_to_skip=1)
+    everyday = _account_profile("Everyday", "12345678", **common)
+    vacation = _account_profile("Vacation Fund", "87654321", **common)
+    source = tmp_path / "export.csv"
+    source.write_text(
+        "Account Activity Export\n"
+        "Generated 11/19/2026\n"
+        "Date,Account Number,Description,Credit,Debit\n"
+        "11/01/2026,XXXX4321,Deposit,10.00,\n"
+        "Total,,,10.00,\n",
+        encoding="utf-8",
+    )
+    spy = _DialogSpy(monkeypatch)
+    window = MainWindow()
+    window.profiles = {"Everyday": everyday, "Vacation Fund": vacation}
+    assert window.leading_rows_spin.value() == 0
+
+    _load(window, source)
+
+    assert spy.total == 1
+    assert "Vacation Fund" in spy.questions[0]
+    assert "account number in CSV" in spy.questions[0]
+    assert window.bank_name_input.text() == "Vacation Fund"
+    assert window.leading_rows_spin.value() == 2
+    assert window.trailing_rows_spin.value() == 1
+    assert window.current_headers == ["Date", "Account Number", "Description", "Credit", "Debit"]

@@ -1,17 +1,19 @@
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
+
+from .number_format import parse_amount
 
 DEFAULT_FILENAME_PATTERN = "{account_name}_{account_id}_{statement_date}_{ending_balance}.csv"
 
 _TEMPLATE_FIELDS = {
-    "account_name": r"(?P<account_name>[A-Za-z0-9_]+)",
+    "account_name": r"(?P<account_name>[A-Za-z0-9][A-Za-z0-9 _-]*)",
     "last8": r"(?P<last8>[A-Za-z0-9][A-Za-z0-9_-]{1,31})",
     "account_id": r"(?P<account_id>[A-Za-z0-9][A-Za-z0-9_-]{1,31})",
     "statement_date": r"(?P<statement_date>[A-Za-z0-9._/-]+)",
-    "ending_balance": r"(?P<ending_balance>-?\d+\.\d{2})",
+    "ending_balance": r"(?P<ending_balance>-?\d[\d,]*\.\d{2})",
 }
 
 
@@ -87,6 +89,27 @@ def parse_filename_metadata(path: Path, template: str = DEFAULT_FILENAME_PATTERN
     )
 
 
+def account_ids_match(candidate: str, account_id: str) -> bool:
+    """True when two account identifiers refer to the same account.
+
+    Matches exactly (ignoring case and punctuation), or by trailing digits when
+    one side is masked or truncated, e.g. "XXXX4321" or "4321" vs "87654321".
+    At least four digits must line up so short numbers can't match by accident.
+    """
+    left = re.sub(r"[^0-9a-z]", "", (candidate or "").casefold())
+    right = re.sub(r"[^0-9a-z]", "", (account_id or "").casefold())
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+
+    left_digits = re.sub(r"\D", "", left)
+    right_digits = re.sub(r"\D", "", right)
+    if len(left_digits) < 4 or len(right_digits) < 4:
+        return False
+    return left_digits.endswith(right_digits) or right_digits.endswith(left_digits)
+
+
 def normalize_statement_date(value: str) -> str:
     text = (value or "").strip()
     if not text:
@@ -143,14 +166,13 @@ def normalize_statement_date(value: str) -> str:
     return ""
 
 
-def normalize_balance(value: str) -> str:
-    text = (value or "").strip().replace(",", "")
+def normalize_balance(value: str, decimal_separator: str = ".") -> str:
+    text = (value or "").strip()
     if not text:
         return ""
 
-    try:
-        amount = Decimal(text)
-    except InvalidOperation:
+    amount = parse_amount(text, decimal_separator)
+    if amount is None:
         return ""
 
     normalized = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
