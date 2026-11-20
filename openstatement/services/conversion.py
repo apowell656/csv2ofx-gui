@@ -13,6 +13,7 @@ from pathlib import Path
 from dateutil.parser import parse as parse_date
 
 from ..models.profile import BankProfile, quote_py_string, to_account_id
+from . import number_format
 
 INVALID_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]')
 
@@ -365,29 +366,112 @@ def format_preview(ofx_content: str, max_rows: int = 20) -> str:
     return f"{header}{divider}\n" + "\n".join(rows) + suffix
 
 
+_MAPPING_RUNTIME_TEMPLATE = """\
+import re
+import unicodedata
+from decimal import Decimal, InvalidOperation
+from operator import itemgetter
+
+# Helpers below mirror openstatement.services.number_format. The mapping file runs
+# inside csv2ofx (possibly a separate process), so it cannot import OpenStatement.
+_DECIMAL_SEPARATOR = {decimal_separator!r}
+_STRIP_CHARS_RE = re.compile(r'[^0-9.,+\\-]')
+_MINUS_LIKE = {minus_like!a}
+_LEADING_DRCR_RE = re.compile(r'^(dr|cr)\\.?(?![a-z])\\s*(.*)$', re.IGNORECASE)
+_TRAILING_DRCR_RE = re.compile(r'^(.*?)(?<![a-z])(dr|cr)\\.?$', re.IGNORECASE)
+MONTH_NAMES = {month_names!r}
+ENGLISH_MONTH_ABBR = {month_abbr!r}
+_MONTH_WORD_RE = re.compile(r'[^\\W\\d_]+\\.?')
+
+
+def parse_amount(value):
+    text = str(value if value is not None else '').strip()
+    for ch in _MINUS_LIKE:
+        text = text.replace(ch, '-')
+    if not text:
+        return None
+    negative = False
+    leading = _LEADING_DRCR_RE.match(text)
+    trailing = None if leading else _TRAILING_DRCR_RE.match(text)
+    if leading:
+        negative = leading.group(1).lower() == 'dr'
+        text = leading.group(2).strip()
+    elif trailing:
+        negative = trailing.group(2).lower() == 'dr'
+        text = trailing.group(1).strip()
+    if text.startswith('(') and text.endswith(')'):
+        negative = True
+        text = text[1:-1].strip()
+    if text.endswith('-') and not text.startswith('-'):
+        negative = True
+        text = text[:-1].strip()
+    cleaned = _STRIP_CHARS_RE.sub('', text)
+    if _DECIMAL_SEPARATOR == ',':
+        cleaned = cleaned.replace('.', '').replace(',', '.')
+    else:
+        cleaned = cleaned.replace(',', '')
+    try:
+        amount = Decimal(cleaned)
+    except InvalidOperation:
+        return None
+    if not amount.is_finite():
+        return None
+    return -amount if negative else amount
+
+
+def _fold(text):
+    decomposed = unicodedata.normalize('NFKD', text.lower())
+    return ''.join(ch for ch in decomposed if not unicodedata.combining(ch)).replace('\\u0142', 'l')
+
+
+def _month_for_word(word):
+    token = _fold(word.rstrip('.'))
+    if len(token) < 3:
+        return None
+    matches = {{month for month, names in MONTH_NAMES.items() for name in names if name.startswith(token)}}
+    return matches.pop() if len(matches) == 1 else None
+
+
+def normalize_date_text(value):
+    text = ' '.join(str(value if value is not None else '').split())
+    if not text or not any(ch.isalpha() for ch in text):
+        return text
+
+    def replace(match):
+        month = _month_for_word(match.group(0))
+        return ENGLISH_MONTH_ABBR[month - 1] if month else match.group(0)
+
+    return _MONTH_WORD_RE.sub(replace, text)
+
+"""
+
+
+def _mapping_runtime_source(decimal_separator: str) -> str:
+    return _MAPPING_RUNTIME_TEMPLATE.format(
+        decimal_separator=decimal_separator,
+        minus_like=number_format._MINUS_LIKE,
+        month_names=number_format.MONTH_NAMES,
+        month_abbr=number_format.ENGLISH_MONTH_ABBR,
+    )
+
+
 def write_mapping_file(mapping_file: Path, profile: BankProfile) -> None:
     fallback_account = profile.name or "Account"
     fallback_bank = profile.name or "Bank"
     amount_col = _mapping_column_name(profile.field_map.get("amount", ""), profile.has_header)
     debit_col = _mapping_column_name(profile.debit_col, profile.has_header)
     credit_col = _mapping_column_name(profile.credit_col, profile.has_header)
+    decimal_separator = number_format.normalize_decimal_separator(profile.decimal_separator)
 
     lines = [
-        "from operator import itemgetter",
-        "",
+        _mapping_runtime_source(decimal_separator),
         "def _to_float(value):",
-        "    text = str(value or '').strip()",
-        "    if not text:",
-        "        return 0.0",
-        "    negative = text.startswith('(') and text.endswith(')')",
-        "    if negative:",
-        "        text = text[1:-1]",
-        "    cleaned = text.replace('$', '').replace(',', '').replace(' ', '')",
-        "    cleaned = ''.join(ch for ch in cleaned if ch in '0123456789+-.')",
-        "    if cleaned in {'', '+', '-', '.', '+.', '-.'}:",
-        "        return 0.0",
-        "    amount = float(cleaned)",
-        "    return -amount if negative else amount",
+        "    amount = parse_amount(value)",
+        "    return float(amount) if amount is not None else 0.0",
+        "",
+        "def _to_optional_float(value):",
+        "    amount = parse_amount(value)",
+        "    return float(amount) if amount is not None else None",
         "",
         "def _split_amount(record):",
         f"    debit = _to_float(record.get({quote_py_string(debit_col)}, ''))",
@@ -405,7 +489,7 @@ def write_mapping_file(mapping_file: Path, profile: BankProfile) -> None:
     ]
 
     date_col = _mapping_column_name(profile.field_map["date"], profile.has_header)
-    lines.append(f"    'date': itemgetter({quote_py_string(date_col)}),")
+    lines.append(f"    'date': lambda record: normalize_date_text(record.get({quote_py_string(date_col)}, '')),")
 
     if profile.use_split_amounts:
         lines.append("    'amount': _split_amount,")
@@ -426,11 +510,18 @@ def write_mapping_file(mapping_file: Path, profile: BankProfile) -> None:
     else:
         lines.append(f"    'bank': {quote_py_string(fallback_bank)},")
 
-    for field in ["payee", "desc", "notes", "check_num", "id", "balance", "class"]:
+    for field in ["payee", "desc", "notes", "check_num", "id", "class"]:
         col = profile.field_map.get(field)
         if col:
             col = _mapping_column_name(col, profile.has_header)
             lines.append(f"    '{field}': itemgetter({quote_py_string(col)}),")
+
+    balance_col = profile.field_map.get("balance")
+    if balance_col:
+        balance_col = _mapping_column_name(balance_col, profile.has_header)
+        lines.append(
+            f"    'balance': lambda record: _to_optional_float(record.get({quote_py_string(balance_col)}, '')),"
+        )
 
     if profile.date_format:
         lines.append(f"    'parse_fmt': {quote_py_string(profile.date_format)},")

@@ -486,10 +486,12 @@ class UiSectionMixin:
         self.date_format_input.setMaximumWidth(180)
         date_format_help = (
             "Enter the CSV transaction date format passed to csv2ofx, using strftime-style tokens such as "
-            "%m/%d/%Y, %d/%m/%Y, or %Y-%m-%d. If your CSV dates are ambiguous, use Day-first dates as needed."
+            "%m/%d/%Y (US), %d.%m.%Y (German/European), %d/%m/%Y, or %Y-%m-%d. "
+            "OpenStatement tries to detect this automatically when a CSV is loaded. "
+            "If your CSV dates are ambiguous, use Day-first dates as needed."
         )
         self.date_format_input.setToolTip(date_format_help)
-        date_hint = QLabel("Example: %m/%d/%Y")
+        date_hint = QLabel("e.g. %m/%d/%Y or %d.%m.%Y")
         date_hint.setObjectName("inlineHint")
         date_hint.setToolTip(date_format_help)
         date_hint_row = QHBoxLayout()
@@ -512,6 +514,14 @@ class UiSectionMixin:
         dayfirst_row.addStretch(1)
         dayfirst_widget = QWidget()
         dayfirst_widget.setLayout(dayfirst_row)
+
+        self.decimal_separator_combo = QComboBox()
+        self.decimal_separator_combo.addItem("Period  (1,234.56)", ".")
+        self.decimal_separator_combo.addItem("Comma  (1.234,56)", ",")
+        self.decimal_separator_combo.setToolTip(
+            "How amounts in this CSV mark the decimal point. US banks use a period (1,234.56); "
+            "many European banks use a comma (1.234,56). Detected automatically when a CSV is loaded."
+        )
 
         self.account_type_combo = QComboBox()
         self.account_type_combo.addItems(["CHECKING", "SAVINGS", "CREDITLINE"])
@@ -554,8 +564,10 @@ class UiSectionMixin:
         grid.addWidget(date_hint_widget, 2, 1)
         grid.addWidget(self._field_label("Currency"), 2, 2)
         grid.addWidget(self.currency_input, 2, 3, alignment=Qt.AlignLeft)
-        grid.addWidget(dayfirst_widget, 3, 0, 1, 2)
-        grid.addWidget(button_widget, 3, 2, 1, 2)
+        grid.addWidget(self._field_label("Decimal separator"), 3, 0)
+        grid.addWidget(self.decimal_separator_combo, 3, 1, alignment=Qt.AlignLeft)
+        grid.addWidget(dayfirst_widget, 4, 0, 1, 2)
+        grid.addWidget(button_widget, 4, 2, 1, 2)
 
         body.addLayout(grid)
         return card
@@ -770,6 +782,7 @@ class UiSectionMixin:
         self.profile_combo.setCurrentIndex(0)
         self.date_format_input.setText("%m/%d/%Y")
         self.dayfirst_check.setChecked(False)
+        self.decimal_separator_combo.setCurrentIndex(0)
         self.account_type_combo.setCurrentText("CHECKING")
         self.account_id_input.clear()
         self.currency_input.setText("USD")

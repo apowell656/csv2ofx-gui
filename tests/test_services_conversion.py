@@ -119,7 +119,7 @@ def test_write_mapping_file_no_header_uses_csv2ofx_column_names(tmp_path: Path) 
     write_mapping_file(target, profile)
     text = target.read_text(encoding="utf-8")
     assert "'has_header': False" in text
-    assert "itemgetter('column_1')" in text
+    assert "normalize_date_text(record.get('column_1'" in text
     assert "record.get('column_2'" in text
     assert "itemgetter('column_3')" in text
 
@@ -522,3 +522,204 @@ def test_apply_ofx_overrides_preserves_existing_values(tmp_path: Path) -> None:
     assert "<ACCTID>existing" in out
     assert "<BALAMT>44.00" in out
     assert "<DTASOF>20260101" in out
+
+
+def _exec_mapping(target: Path) -> dict:
+    namespace: dict[str, object] = {}
+    exec(target.read_text(encoding="utf-8"), namespace)  # noqa: S102
+    return namespace
+
+
+def test_write_mapping_file_comma_decimal_amounts(tmp_path: Path) -> None:
+    profile = make_profile(split=False)
+    profile.decimal_separator = ","
+    profile.field_map["balance"] = "Saldo"
+    target = tmp_path / "mapping.py"
+    write_mapping_file(target, profile)
+
+    mapping = _exec_mapping(target)["mapping"]
+    assert mapping["amount"]({"Amount": "-12,50"}) == -12.5
+    assert mapping["amount"]({"Amount": "1.234,56"}) == 1234.56
+    assert mapping["balance"]({"Saldo": "2.456,62"}) == 2456.62
+    assert mapping["balance"]({"Saldo": ""}) is None
+
+
+AMOUNT_SAMPLES = [
+    "",
+    "1,234.56",
+    "1.234,56",
+    "(12.50)",
+    "12,50-",
+    "$7",
+    "abc",
+    "-",
+    "1\u00a0234,56 \u20ac",
+    "\u221212,50 kr",
+    "12.50 DR",
+    "CR 12.50",
+    "CRC 1.234,50",
+    "1'234.56 CHF",
+    "1,23,456.78",
+    "-1.234,567 KWD",
+    "NaN",
+    "Infinity",
+]
+
+DATE_SAMPLES = [
+    "13.11.2026",
+    "2026-11-13",
+    "13. Nov. 2026",
+    "13 de noviembre de 2026",
+    "3 M\u00e4rz 2026",
+    "13 f\u00e9vr. 2026",
+    "13 listopada 2026",
+    "13 okt 2026",
+    "Nov 13, 2026",
+    "  13   nov  2026 ",
+    "",
+]
+
+
+@pytest.mark.parametrize("separator", [".", ","])
+@pytest.mark.parametrize("raw", AMOUNT_SAMPLES)
+def test_generated_parser_matches_number_format(tmp_path: Path, separator: str, raw: str) -> None:
+    from openstatement.services.number_format import parse_amount
+
+    profile = make_profile(split=False)
+    profile.decimal_separator = separator
+    target = tmp_path / "mapping.py"
+    write_mapping_file(target, profile)
+
+    assert _exec_mapping(target)["parse_amount"](raw) == parse_amount(raw, separator)
+
+
+def test_run_conversion_german_csv_end_to_end(tmp_path: Path) -> None:
+    if find_csv2ofx_binary() is None:
+        pytest.skip("csv2ofx not installed")
+
+    source = tmp_path / "de.csv"
+    source.write_text(
+        "Datum;Betrag;Empfaenger;Saldo\n"
+        "13.11.2026;-12,50;Baeckerei;1.222,06\n"
+        "14.11.2026;1.234,56;Gehalt;2.456,62\n",
+        encoding="utf-8",
+    )
+    profile = BankProfile(
+        name="DE",
+        headers=[],
+        delimiter=";",
+        field_map={"date": "Datum", "amount": "Betrag", "payee": "Empfaenger", "balance": "Saldo"},
+        debit_col="",
+        credit_col="",
+        use_split_amounts=False,
+        date_format="%d.%m.%Y",
+        dayfirst=False,
+        account_type="CHECKING",
+        account_id="de",
+        currency="EUR",
+        auto_parse_filename_metadata=False,
+        filename_pattern="",
+        has_header=True,
+        decimal_separator=",",
+    )
+    dest = tmp_path / "de.ofx"
+    run_conversion(find_csv2ofx_binary(), source, dest, profile)
+
+    content = dest.read_text(encoding="utf-8")
+    assert "<TRNAMT>-12.50" in content
+    assert "<TRNAMT>1234.56" in content
+    assert "<DTPOSTED>20261113" in content
+    assert "<BALAMT>2456.62" in content
+
+
+@pytest.mark.parametrize("raw", DATE_SAMPLES)
+def test_generated_date_normalizer_matches_number_format(tmp_path: Path, raw: str) -> None:
+    from openstatement.services.number_format import normalize_date_text
+
+    target = tmp_path / "mapping.py"
+    write_mapping_file(target, make_profile(split=False))
+
+    assert _exec_mapping(target)["normalize_date_text"](raw) == normalize_date_text(raw)
+
+
+def test_generated_mapping_is_ascii(tmp_path: Path) -> None:
+    target = tmp_path / "mapping.py"
+    write_mapping_file(target, make_profile(split=False))
+    target.read_bytes().decode("ascii")
+
+
+@pytest.mark.parametrize(
+    ("csv_text", "date_format", "separator", "expected_amounts", "expected_date"),
+    [
+        pytest.param(
+            "Date;Amount;Payee\n13. Nov. 2026;−12,50;Shop\n14. Okt. 2026;1.234,56;Pay\n",
+            "%d. %b %Y", ",", ["-12.50", "1234.56"], "20261113", id="german-month-names",
+        ),
+        pytest.param(
+            "Date;Amount;Payee\n13 de noviembre de 2026;-12,50;Tienda\n",
+            "%d de %b de %Y", ",", ["-12.50"], "20261113", id="spanish-long-dates",
+        ),
+        pytest.param(
+            "Date,Amount,Payee\n13/11/2026,12.50 DR,Shop\n14/11/2026,100.00 CR,Pay\n",
+            "%d/%m/%Y", ".", ["-12.50", "100.00"], "20261113", id="uk-dr-cr",
+        ),
+        pytest.param(
+            "Date;Amount;Payee\n2026.11.13.;1 234,50 Ft;Bolt\n",
+            "%Y.%m.%d.", ",", ["1234.50"], "20261113", id="hungarian",
+        ),
+        pytest.param(
+            "Date,Amount,Payee\n2026/11/13,\"¥1,200\",Shop\n",
+            "%Y/%m/%d", ".", ["1200.00"], "20261113", id="japanese",
+        ),
+        pytest.param(
+            "Date;Amount;Payee\n13.11.2026 14:30;CHF 1'234.50;Migros\n",
+            "%d.%m.%Y %H:%M", ".", ["1234.50"], "20261113", id="swiss-with-time",
+        ),
+    ],
+)
+def test_run_conversion_international_formats(
+    tmp_path: Path, csv_text: str, date_format: str, separator: str, expected_amounts: list[str], expected_date: str
+) -> None:
+    if find_csv2ofx_binary() is None:
+        pytest.skip("csv2ofx not installed")
+
+    source = tmp_path / "in.csv"
+    source.write_text(csv_text, encoding="utf-8")
+    profile = make_profile(split=False)
+    profile.delimiter = ";" if ";" in csv_text.splitlines()[0] else ","
+    profile.date_format = date_format
+    profile.dayfirst = False
+    profile.decimal_separator = separator
+    dest = tmp_path / "out.ofx"
+    run_conversion(find_csv2ofx_binary(), source, dest, profile)
+
+    content = dest.read_text(encoding="utf-8")
+    for amount in expected_amounts:
+        assert f"<TRNAMT>{amount}" in content
+    assert f"<DTPOSTED>{expected_date}" in content
+
+
+def test_run_conversion_comma_decimal_with_skipped_rows(tmp_path: Path) -> None:
+    if find_csv2ofx_binary() is None:
+        pytest.skip("csv2ofx not installed")
+
+    source = tmp_path / "de.csv"
+    source.write_text(
+        "Kontoauszug\nDatum;Betrag;Empfaenger\n13.11.2026;-12,50;Baeckerei\n14.11.2026;1.234,56;Gehalt\nSumme;1.222,06;\n",
+        encoding="utf-8",
+    )
+    profile = make_profile(split=False)
+    profile.delimiter = ";"
+    profile.field_map = {"date": "Datum", "amount": "Betrag", "payee": "Empfaenger"}
+    profile.date_format = "%d.%m.%Y"
+    profile.dayfirst = False
+    profile.decimal_separator = ","
+    profile.leading_rows_to_skip = 1
+    profile.trailing_rows_to_skip = 1
+    dest = tmp_path / "de.ofx"
+    run_conversion(find_csv2ofx_binary(), source, dest, profile)
+
+    content = dest.read_text(encoding="utf-8")
+    assert content.count("<STMTTRN>") == 2
+    assert "<TRNAMT>-12.50" in content
+    assert "<TRNAMT>1234.56" in content

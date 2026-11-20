@@ -28,6 +28,7 @@ class BankProfile:
     has_header: bool
     leading_rows_to_skip: int = 0
     trailing_rows_to_skip: int = 0
+    decimal_separator: str = "."
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "BankProfile":
@@ -49,6 +50,7 @@ class BankProfile:
             has_header=bool(raw.get("has_header", True)),
             leading_rows_to_skip=max(0, int(raw.get("leading_rows_to_skip", 0) or 0)),
             trailing_rows_to_skip=max(0, int(raw.get("trailing_rows_to_skip", 0) or 0)),
+            decimal_separator="," if raw.get("decimal_separator") == "," else ".",
         )
 
 

@@ -113,3 +113,9 @@ def test_profile_store_save_and_load_roundtrip(tmp_path: Path, monkeypatch) -> N
     assert loaded["ACME"].field_map["date"] == "Date"
     assert loaded["ACME"].leading_rows_to_skip == 3
     assert loaded["ACME"].trailing_rows_to_skip == 2
+
+
+def test_from_dict_decimal_separator_defaults_to_period() -> None:
+    assert BankProfile.from_dict({}).decimal_separator == "."
+    assert BankProfile.from_dict({"decimal_separator": ","}).decimal_separator == ","
+    assert BankProfile.from_dict({"decimal_separator": "x"}).decimal_separator == "."

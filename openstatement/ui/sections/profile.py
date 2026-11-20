@@ -1,3 +1,6 @@
+from contextlib import contextmanager
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
@@ -35,27 +38,59 @@ class ProfileSectionMixin:
             return
         self._load_profile_to_ui(profile)
 
+    @contextmanager
+    def _signals_blocked(self, *widgets):
+        previous = [widget.blockSignals(True) for widget in widgets]
+        try:
+            yield
+        finally:
+            for widget, was_blocked in zip(widgets, previous):
+                widget.blockSignals(was_blocked)
+
+    def _select_profile_in_combo(self, name: str) -> None:
+        idx = self.profile_combo.findText(name, Qt.MatchFixedString)
+        if idx >= 0:
+            with self._signals_blocked(self.profile_combo):
+                self.profile_combo.setCurrentIndex(idx)
+
     def _load_profile_to_ui(self, profile: BankProfile) -> None:
+        """Apply a saved profile to the form exactly once.
+
+        Widgets whose signals would re-read the CSV (and re-run detection and the
+        profile prompt) are silenced; if the header/delimiter settings change, the
+        CSV is re-read once without detection before the mappings are applied.
+        """
+        source = self.csv_path_input.text().strip()
+        reload_needed = bool(source) and (
+            self.csv_has_header_check.isChecked() != profile.has_header
+            or self._effective_delimiter(self.delimiter_input.text()) != profile.delimiter
+            or self.leading_rows_spin.value() != profile.leading_rows_to_skip
+        )
+
+        with self._signals_blocked(
+            self.csv_has_header_check,
+            self.leading_rows_spin,
+            self.trailing_rows_spin,
+            self.auto_parse_filename_check,
+            self.filename_pattern_input,
+        ):
+            self.delimiter_input.setText(self._delimiter_for_input(profile.delimiter))
+            self.csv_has_header_check.setChecked(profile.has_header)
+            self.leading_rows_spin.setValue(profile.leading_rows_to_skip)
+            self.trailing_rows_spin.setValue(profile.trailing_rows_to_skip)
+            self.auto_parse_filename_check.setChecked(profile.auto_parse_filename_metadata)
+            self.filename_pattern_input.setText(normalize_filename_pattern(profile.filename_pattern))
+        self._toggle_filename_metadata_panel(profile.auto_parse_filename_metadata)
+
+        if reload_needed:
+            self.load_csv_headers(source, detect=False)
+
         self.bank_name_input.setText(profile.name)
-        self.delimiter_input.setText(self._delimiter_for_input(profile.delimiter))
         self.date_format_input.setText(profile.date_format)
         self.dayfirst_check.setChecked(profile.dayfirst)
+        self._set_decimal_separator(profile.decimal_separator)
         self.account_id_input.setText(profile.account_id)
         self.currency_input.setText(profile.currency)
-        self.auto_parse_filename_check.setChecked(profile.auto_parse_filename_metadata)
-        self.filename_pattern_input.setText(normalize_filename_pattern(profile.filename_pattern))
-
-        self.csv_has_header_check.blockSignals(True)
-        self.csv_has_header_check.setChecked(profile.has_header)
-        self.csv_has_header_check.blockSignals(False)
-
-        self.leading_rows_spin.blockSignals(True)
-        self.leading_rows_spin.setValue(profile.leading_rows_to_skip)
-        self.leading_rows_spin.blockSignals(False)
-
-        self.trailing_rows_spin.setValue(profile.trailing_rows_to_skip)
-
-        self._on_header_setting_changed()
 
         type_idx = self.account_type_combo.findText(profile.account_type, Qt.MatchFixedString)
         if type_idx >= 0:
@@ -67,6 +102,16 @@ class ProfileSectionMixin:
         self.use_split_amounts.setChecked(profile.use_split_amounts)
         self._set_combo_value(self.debit_col, profile.debit_col)
         self._set_combo_value(self.credit_col, profile.credit_col)
+
+        if source:
+            # Fill statement date / balance from the filename without overriding the profile's name and account.
+            self._refresh_filename_metadata(Path(source), update_identity=False)
+        self._select_profile_in_combo(profile.name)
+
+    def _set_decimal_separator(self, separator: str) -> None:
+        idx = self.decimal_separator_combo.findData("," if separator == "," else ".")
+        if idx >= 0:
+            self.decimal_separator_combo.setCurrentIndex(idx)
 
     def _build_profile_from_ui(self) -> BankProfile:
         name = self.bank_name_input.text().strip()
@@ -96,6 +141,7 @@ class ProfileSectionMixin:
             has_header=self.csv_has_header_check.isChecked(),
             leading_rows_to_skip=self.leading_rows_spin.value(),
             trailing_rows_to_skip=self.trailing_rows_spin.value(),
+            decimal_separator=str(self.decimal_separator_combo.currentData() or "."),
         )
 
     def save_profile(self) -> None:
@@ -116,9 +162,7 @@ class ProfileSectionMixin:
         self.profiles[name] = profile
         self.profile_store.save(self.profiles)
         self._refresh_profile_combo()
-        idx = self.profile_combo.findText(name, Qt.MatchFixedString)
-        if idx >= 0:
-            self.profile_combo.setCurrentIndex(idx)
+        self._select_profile_in_combo(name)
 
         QMessageBox.information(self, "Saved", f"Profile '{name}' saved.")
 
@@ -179,9 +223,6 @@ class ProfileSectionMixin:
             if profile is None:
                 return
             self._load_profile_to_ui(profile)
-            idx = self.profile_combo.findText(profile.name, Qt.MatchFixedString)
-            if idx >= 0:
-                self.profile_combo.setCurrentIndex(idx)
             dialog.accept()
 
         def delete_selected() -> None:
@@ -258,6 +299,7 @@ class ProfileSectionMixin:
             f"Delimiter: {profile.delimiter!r}\n"
             f"Date Format: {profile.date_format or '(none)'}\n"
             f"Day-first Dates: {'Yes' if profile.dayfirst else 'No'}\n"
+            f"Decimal Separator: {'Comma (1.234,56)' if profile.decimal_separator == ',' else 'Period (1,234.56)'}\n"
             f"Auto-parse Filename Metadata: {'Yes' if profile.auto_parse_filename_metadata else 'No'}\n"
             f"Filename Pattern: {profile.filename_pattern}\n"
             f"Leading Rows to Skip: {profile.leading_rows_to_skip}\n"
