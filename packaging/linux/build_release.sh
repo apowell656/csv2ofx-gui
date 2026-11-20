@@ -128,7 +128,7 @@ if [[ ! -x "$APPIMAGETOOL" ]]; then
   if command -v wget >/dev/null 2>&1; then
     wget -O "$APPIMAGETOOL" "$APPIMAGETOOL_URL"
   elif command -v curl >/dev/null 2>&1; then
-    curl -L "$APPIMAGETOOL_URL" -o "$APPIMAGETOOL"
+    curl --fail --location "$APPIMAGETOOL_URL" -o "$APPIMAGETOOL"
   else
     echo "Missing wget or curl to download appimagetool."
     echo "Install one with: sudo apt install -y wget"
@@ -172,6 +172,28 @@ desktop-file-validate "$APPDIR/$APP_ID.desktop"
 APPIMAGE_OUTPUT="$PACKAGE_DIR/${APP_NAME}-${VERSION}-${APPIMAGE_ARCH}.AppImage"
 ARCH="$APPIMAGE_ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" "$APPDIR" "$APPIMAGE_OUTPUT"
 chmod +x "$APPIMAGE_OUTPUT"
+
+# Inspect the actual distributables, not just the staging directories.
+DEB_OUTPUT="$PACKAGE_DIR/${APP_ID}_${VERSION}_${DEB_ARCH}.deb"
+test -s "$DEB_OUTPUT"
+test -s "$APPIMAGE_OUTPUT"
+[[ "$(dpkg-deb -f "$DEB_OUTPUT" Package)" == "$APP_ID" ]]
+[[ "$(dpkg-deb -f "$DEB_OUTPUT" Version)" == "$VERSION" ]]
+[[ "$(dpkg-deb -f "$DEB_OUTPUT" Architecture)" == "$DEB_ARCH" ]]
+VALIDATION_DIR="$(mktemp -d)"
+trap 'rm -rf "$VALIDATION_DIR"' EXIT
+dpkg-deb -x "$DEB_OUTPUT" "$VALIDATION_DIR/deb"
+test -x "$VALIDATION_DIR/deb/opt/$APP_NAME/$APP_NAME"
+test -x "$VALIDATION_DIR/deb/usr/bin/$APP_ID"
+desktop-file-validate "$VALIDATION_DIR/deb/usr/share/applications/$APP_ID.desktop"
+(
+  cd "$VALIDATION_DIR"
+  "$APPIMAGE_OUTPUT" --appimage-extract >/dev/null
+)
+test -x "$VALIDATION_DIR/squashfs-root/AppRun"
+test -x "$VALIDATION_DIR/squashfs-root/opt/$APP_NAME/$APP_NAME"
+test -s "$VALIDATION_DIR/squashfs-root/$APP_ID.png"
+desktop-file-validate "$VALIDATION_DIR/squashfs-root/$APP_ID.desktop"
 
 echo
 echo "Release artifacts:"

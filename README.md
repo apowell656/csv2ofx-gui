@@ -343,3 +343,10 @@ python -c "from PySide6.QtWidgets import QApplication; app=QApplication([]); pri
 ![OpenStatement on Windows](images/OpenStatement_Windows.png)
 
 ![OpenStatement on Linux](images/OpenStatement_linux.png)
+
+## Automated Windows and Linux Releases
+
+See [the release guide](packaging/RELEASING.md) for manual GitHub Actions test
+builds, version-tag builds, adding the locally built macOS binary, and publishing
+the completed draft. Workflow artifacts are retained for seven days; manual
+runs never create a release.
